@@ -1,1 +1,3 @@
-# SCM_Stockout_Automation
+streamlit
+pandas
+numpy
