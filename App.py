@@ -9,7 +9,7 @@ import os
 import json
 
 # Get API key from Streamlit secrets or environment variable
-groq_api_key = st.secrets.get("GROQ_API_KEY") or os.getenv("GROQ_API_KEY")
+groq_api_key = st.secrets.get("GROQ_API_KEY")
 if not groq_api_key:
     st.error("GROQ_API_KEY is not set. Please configure it in Streamlit secrets or as an environment variable.")
     st.markdown("""
