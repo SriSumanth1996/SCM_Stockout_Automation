@@ -4,4 +4,4 @@ numpy
 datetime
 smtplib
 groq
-Groq
+email
