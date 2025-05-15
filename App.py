@@ -418,7 +418,7 @@ if st.session_state.day_started:
         if not due_today_orders.empty:
             st.markdown("""
             <div class="warning-box">
-                <strong>⚠️ OVERDUE ALERT!</strong> The following orders are to be delivered today:
+                <strong>⚠️ DUE TODAY ALERT!</strong> The following orders are to be delivered today:
                 <ul>
             """ + "\n".join([
                                 f"<li>{row['Product']} from {row['Supplier']} (Ordered: {row['Order_Date'].strftime('%Y-%m-%d')}, Promised: {row['Promised_Date'].strftime('%Y-%m-%d')})</li>"
@@ -464,7 +464,7 @@ if st.session_state.day_started:
         # Warning for overdue orders
         overdue_orders = df_proc[(df_proc['Received'] == False) &
                                  (df_proc['Status'] == "Overdue")]
-        if not due_today_orders.empty:
+        if not overdue_orders.empty:
             st.markdown("""
             <div class="warning-box">
                 <strong>⚠️ OVERDUE ALERT!</strong> The following orders are overdue:
