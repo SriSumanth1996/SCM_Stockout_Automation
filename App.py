@@ -151,9 +151,9 @@ def process_query(query, stock_df, base_prices, units, product_descriptions, cli
 
     Instructions:
     - Identify the product (case-insensitive) and intent from the query.
-    - Do not unnecessarily provide stock quantities unless explicitly asked.
-    - For 'description', use the provided description.
-    - For 'availability', check if Available_Stock >= ROL for the identified product. If Available_Stock >= ROL, say the product is available (e.g., "Yes, [product] is available!"). If Available_Stock < ROL or product is not identified, say the product is not available (e.g., "Sorry, [product] is not available right now."). If no product is identified, ask for clarification (e.g., "Which product are you asking about?").
+    - Do not provide stock quantities unless explicitly asked.
+    - For 'description', return the provided description.
+    - For 'availability', check the stock_info dictionary for the product's Available_Stock and ROL. If Available_Stock >= ROL, the product is available (e.g., "Yes, [product] is available!"). If Available_Stock < ROL, the product is not available (e.g., "Sorry, [product] is not available right now."). If no product is identified, ask for clarification (e.g., "Which product are you asking about?").
     - For 'price', provide the price per unit.
     - For 'all_products', list all products.
     - For 'delivery', mention 2-3 day delivery.
@@ -171,7 +171,7 @@ def process_query(query, stock_df, base_prices, units, product_descriptions, cli
             model="llama-3.1-8b-instant",
             messages=[{"role": "user", "content": prompt}],
             response_format={"type": "json_object"},
-            temperature=0.7,
+            temperature=0.8,  # Lowered for more deterministic responses
             max_tokens=200
         )
         result = json.loads(completion.choices[0].message.content)
@@ -179,10 +179,27 @@ def process_query(query, stock_df, base_prices, units, product_descriptions, cli
         intent = result.get('intent', 'unclear')
         product = result.get('product', None)
 
+        # Validate availability response in Python to ensure correctness
+        if intent == 'availability' and product and product in stock_df['Product'].values:
+            stock_row = stock_df[stock_df['Product'] == product].iloc[0]
+            is_available = stock_row['Available_Stock'] >= stock_row['ROL']
+            if is_available and "not available" in response.lower():
+                response = f"Yes, {product} is available!"
+            elif not is_available and "is available" in response.lower():
+                response = f"Sorry, {product} is not available right now."
+
         # Fallback to last_product for relevant intents if product is None
         if not product and intent in ['price', 'availability', 'description'] and last_product:
             product = last_product
             response = f"Assuming you mean {last_product}: {response}"
+            # Re-validate for availability with last_product
+            if intent == 'availability' and last_product in stock_df['Product'].values:
+                stock_row = stock_df[stock_df['Product'] == last_product].iloc[0]
+                is_available = stock_row['Available_Stock'] >= stock_row['ROL']
+                if is_available and "not available" in response.lower():
+                    response = f"Yes, {last_product} is available!"
+                elif not is_available and "is available" in response.lower():
+                    response = f"Sorry, {last_product} is not available right now."
 
         return response, intent, product
     except Exception as e:
@@ -254,7 +271,7 @@ with st.sidebar:
 
         if st.session_state.chat_history:
             st.write("**Chat History**")
-            for chat in st.session_state.chat_history[-5:]:
+            for chat in st.session_state.chat_history[-5:][::-1]:  # Reverse to show newest first
                 st.markdown(f"**You**: {chat['user']}")
                 st.markdown(f"**Assistant**: {chat['bot']}", unsafe_allow_html=True)
                 st.markdown("---")
@@ -442,6 +459,30 @@ if st.session_state.day_started:
             .stDataEditor { border-collapse: collapse; width: 100%; }
             .stDataEditor th, .stDataEditor td { border: 1px solid black; padding: 8px; text-align: left; }
             .stDataEditor th { background-color: #f2f2f2; }
+ worthy="false" class="stDataFrame" data-testid="stDataFrame" style="width: 100%;">
+<thead>
+<tr style="text-align: right;">
+<th></th>
+<th>Product</th>
+<th>Supplier</th>
+<th>Units Ordered</th>
+<th>Rate per Unit</th>
+<th>Total Cost</th>
+<th>Order_Date</th>
+<th>Promised Days</th>
+<th>Promised_Date</th>
+<th>Lead_Time_days</th>
+<th>Lead_Time_Date</th>
+<th>Order_Placed</th>
+<th>Days Left</th>
+<th>Status</th>
+<th>Received</th>
+</tr>
+</thead>
+<tbody>
+</tbody>
+</table>
+</div>
             .overdue { background-color: #ffcccc; color: red; animation: blink 1s infinite; }
             .warning-box { background-color: #fff3cd; border-left: 5px solid #ffc107; padding: 10px; margin: 10px 0; }
         </style>
