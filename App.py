@@ -88,7 +88,9 @@ for key, value in {
     'chat_history': [],
     'chat_input_counter': 0,
     'last_user_input': None,
-    'show_chat': False
+    'show_chat': False,
+    'last_intent': None,
+    'last_product': None
 }.items():
     if key not in st.session_state:
         st.session_state[key] = value
@@ -98,7 +100,7 @@ st.title(f"🛒 Product Ordering App - {st.session_state.simulation_day.strftime
 
 # --- CUSTOMER CHATBOT ---
 def process_query(query, stock_df, base_prices, units, product_descriptions, client):
-    """Process user query with Groq's Llama 3.1 70B."""
+    """Process user query with Groq's Models, supporting multi-turn conversation."""
     if not query.strip():
         return None, None, None
 
@@ -112,8 +114,19 @@ def process_query(query, stock_df, base_prices, units, product_descriptions, cli
         'stock_info': stock_info
     }
 
+    # Build chat history for context (last 5 exchanges)
+    chat_history = st.session_state.chat_history[-5:]
+    history_text = ""
+    for chat in chat_history:
+        if chat['user'] and chat['bot'] and chat['intent'] != "farewell":
+            history_text += f"User: {chat['user']}\nAssistant: {chat['bot']}\n"
+
+    # Use last_intent and last_product for context if available
+    last_intent = st.session_state.last_intent
+    last_product = st.session_state.last_product
+
     prompt = f"""
-    You are a friendly customer support chatbot for Village Gourmet, a grocery store. Your goal is to assist users with queries about products ({', '.join(products)}), provide information, and guide them to place orders if needed. Respond in a casual, engaging tone. Based on the user's query, identify the intent and product (if any), and generate a natural response.
+    You are a friendly customer support chatbot for Bitsom Gourmet, a grocery store. Your goal is to assist users with queries about products ({', '.join(products)}), provide information, and guide them to place orders if needed. Respond in a casual, engaging, and respectable tone. Use the conversation history and last intent/product to interpret follow-up queries, ensuring coherent and context-aware responses.
 
     Context:
     - Products: {json.dumps(products)}
@@ -121,6 +134,11 @@ def process_query(query, stock_df, base_prices, units, product_descriptions, cli
     - Prices: {json.dumps(base_prices)}
     - Units: {json.dumps(units)}
     - Stock Info: {json.dumps(stock_info)}
+    - Last Intent: {json.dumps(last_intent)}
+    - Last Product: {json.dumps(last_product)}
+
+    Conversation History:
+    {history_text}
 
     Intents to detect:
     - description: Asking about a product (e.g., "Tell me about Paneer")
@@ -133,27 +151,40 @@ def process_query(query, stock_df, base_prices, units, product_descriptions, cli
 
     Instructions:
     - Identify the product (case-insensitive) and intent from the query.
+    - Do not unnecessarily provide stock quantities unless explicitly asked.
     - For 'description', use the provided description.
-    - For 'availability', check if Available_Stock >= ROL (available) or not.
+    - For 'availability', check if Available_Stock >= ROL for the identified product. If Available_Stock >= ROL, say the product is available (e.g., "Yes, [product] is available!"). If Available_Stock < ROL or product is not identified, say the product is not available (e.g., "Sorry, [product] is not available right now."). If no product is identified, ask for clarification (e.g., "Which product are you asking about?").
     - For 'price', provide the price per unit.
     - For 'all_products', list all products.
     - For 'delivery', mention 2-3 day delivery.
     - For 'greeting', welcome and suggest asking about products.
     - For 'unclear', guide to ask about products or ordering.
+    - Use the conversation history to understand context (e.g., "Is it available?" refers to the last mentioned product).
+    - If the query is ambiguous (e.g., "Is it available?"), infer the product from Last Product or history; if unclear, ask for clarification (e.g., "Which product do you mean?").
+    - Reference prior exchanges naturally when relevant (e.g., "As I mentioned about Paneer...").
     - Return a JSON object with: intent (string), product (string or null), response (string).
 
-    Query: "{query}"
+    Current Query: "{query}"
     """
     try:
         completion = client.chat.completions.create(
             model="llama-3.1-8b-instant",
             messages=[{"role": "user", "content": prompt}],
             response_format={"type": "json_object"},
-            temperature=0.5,
+            temperature=0.7,
             max_tokens=200
         )
         result = json.loads(completion.choices[0].message.content)
-        return result.get('response'), result.get('intent'), result.get('product')
+        response = result.get('response', "Sorry, I couldn't process that. Please try again!")
+        intent = result.get('intent', 'unclear')
+        product = result.get('product', None)
+
+        # Fallback to last_product for relevant intents if product is None
+        if not product and intent in ['price', 'availability', 'description'] and last_product:
+            product = last_product
+            response = f"Assuming you mean {last_product}: {response}"
+
+        return response, intent, product
     except Exception as e:
         st.error(f"Groq API error: {str(e)}. Please check your API key or network connection.")
         return "Sorry, I'm having trouble processing your query. Please try again!", "unclear", None
@@ -162,13 +193,14 @@ st.sidebar.header("💬 Customer Support")
 if st.sidebar.button("Chat with Us", key="chat_toggle"):
     st.session_state.show_chat = not st.session_state.show_chat
     if st.session_state.show_chat:
-        # Initialize chat with welcome message
         st.session_state.chat_history.append({
             "user": "",
             "bot": "Hey there! I'm here to help with our awesome products. Ask about Paneer, Milk, or anything else!",
             "intent": "greeting",
             "product": None
         })
+        st.session_state.last_intent = None
+        st.session_state.last_product = None
     else:
         st.session_state.chat_history.append({
             "user": "",
@@ -176,11 +208,13 @@ if st.sidebar.button("Chat with Us", key="chat_toggle"):
             "intent": "farewell",
             "product": None
         })
+        st.session_state.last_intent = None
+        st.session_state.last_product = None
+        st.session_state.chat_history = []
     st.rerun()
 
 with st.sidebar:
     with st.expander("Chat Window", expanded=st.session_state.show_chat):
-        # CSS for farewell message
         st.markdown("""
             <style>
                 .farewell-message {
@@ -212,6 +246,8 @@ with st.sidebar:
                     "intent": intent,
                     "product": product
                 })
+                st.session_state.last_intent = intent
+                st.session_state.last_product = product
                 st.session_state.chat_input_counter += 1
                 st.session_state.last_user_input = None
                 st.rerun()
@@ -223,7 +259,6 @@ with st.sidebar:
                 st.markdown(f"**Assistant**: {chat['bot']}", unsafe_allow_html=True)
                 st.markdown("---")
 
-        # Close Chat button
         if st.button("Close Chat", key=f"close_chat_{st.session_state.update_trigger}"):
             st.session_state.show_chat = False
             st.session_state.chat_history.append({
@@ -232,6 +267,9 @@ with st.sidebar:
                 "intent": "farewell",
                 "product": None
             })
+            st.session_state.last_intent = None
+            st.session_state.last_product = None
+            st.session_state.chat_history = []
             st.rerun()
 
 # --- SIMULATION CONTROL ---
@@ -398,7 +436,6 @@ if st.session_state.day_started:
             lambda x: "Overdue" if not x['Received'] and (st.session_state.simulation_day - x['Order_Date']).days > x[
                 'Promised Days'] else "", axis=1)
 
-        # CSS for table and warning styling
         st.markdown("""
         <style>
             @keyframes blink {0% { opacity: 1; } 50% { opacity: 0.5; } 100% { opacity: 1; }}
@@ -410,7 +447,6 @@ if st.session_state.day_started:
         </style>
         """, unsafe_allow_html=True)
 
-        # Warning for orders due today with automatic email
         due_today_orders = df_proc[(df_proc['Received'] == False) &
                                    (df_proc.apply(
                                        lambda x: (st.session_state.simulation_day - x['Order_Date']).days == x[
@@ -427,11 +463,9 @@ if st.session_state.day_started:
             </div>
             """, unsafe_allow_html=True)
 
-            # Automatically send reminder emails
             for idx, row in due_today_orders.iterrows():
                 order_key = f"{idx}_{st.session_state.simulation_day.strftime('%Y-%m-%d')}"
                 if order_key not in st.session_state.sent_reminders:
-                    # Send email
                     msg = EmailMessage()
                     msg.set_content(
                         f"Dear {row['Supplier']},\n\n"
@@ -461,7 +495,6 @@ if st.session_state.day_started:
                     except Exception as e:
                         st.error(f"Failed to send reminder email for {row['Product']} from {row['Supplier']}: {str(e)}")
 
-        # Warning for overdue orders
         overdue_orders = df_proc[(df_proc['Received'] == False) &
                                  (df_proc['Status'] == "Overdue")]
         if not overdue_orders.empty:
@@ -476,14 +509,12 @@ if st.session_state.day_started:
             </div>
             """, unsafe_allow_html=True)
 
-        # Apply styling to overdue rows
         def style_procurement_row(row):
             styles = [''] * len(row)
             if row['Status'] == "Overdue" and not row['Received']:
                 styles = ['background-color: #ffcccc; color: red; animation: blink 1s infinite;'] * len(row)
             return styles
 
-        # Render table with data_editor
         if not df_proc.empty:
             disabled_columns = ["Product", "Supplier", "Units Ordered", "Rate per Unit", "Total Cost",
                                 "Order_Date", "Promised Days", "Promised_Date", "Lead_Time_days",
