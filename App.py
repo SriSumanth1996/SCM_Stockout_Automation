@@ -171,7 +171,7 @@ def process_query(query, stock_df, base_prices, units, product_descriptions, cli
             model="llama-3.1-8b-instant",
             messages=[{"role": "user", "content": prompt}],
             response_format={"type": "json_object"},
-            temperature=0.8,  # Lowered for more deterministic responses
+            temperature=0.8,
             max_tokens=200
         )
         result = json.loads(completion.choices[0].message.content)
@@ -424,7 +424,7 @@ if st.session_state.day_started:
                     promised_days = quote['Promised Days']
                     lead_time_days = int(st.session_state.stock.loc[
                                              st.session_state.stock['Product'] == product, 'Lead_Time_days'].values[0])
-                    st.session_state.procurement_orders.append({
+                    procurement_order = {
                         'Product': product,
                         'Supplier': selection,
                         'Units Ordered': to_order,
@@ -437,9 +437,41 @@ if st.session_state.day_started:
                         'Lead_Time_Date': st.session_state.simulation_day + timedelta(days=lead_time_days),
                         'Order_Placed': "Yes",
                         'Received': False
-                    })
+                    }
+                    st.session_state.procurement_orders.append(procurement_order)
                     st.session_state.order_placed[product] = True
                     st.success(f"{to_order} {units[product]} of {product} ordered from {selection}.")
+
+                    # Send order placement confirmation email
+                    msg = EmailMessage()
+                    msg.set_content(
+                        f"Dear {selection},\n\n"
+                        f"Thank you for accepting our order of {to_order} {units[product]} of {product}, "
+                        f"placed on {st.session_state.simulation_day.strftime('%Y-%m-%d')}. "
+                        f"The order is expected to be delivered by {procurement_order['Promised_Date'].strftime('%Y-%m-%d')}.\n\n"
+                        f"Order Details:\n"
+                        f"- Product: {product}\n"
+                        f"- Supplier: {selection}\n"
+                        f"- Units Ordered: {to_order} {units[product]}\n"
+                        f"- Order Date: {st.session_state.simulation_day.strftime('%Y-%m-%d')}\n"
+                        f"- Promised Delivery Date: {procurement_order['Promised_Date'].strftime('%Y-%m-%d')}\n"
+                        f"- Total Cost: {procurement_order['Total Cost']}\n\n"
+                        f"Please confirm receipt of this order and ensure timely delivery.\n\n"
+                        f"Regards,\nBuyer"
+                    )
+                    msg['Subject'] = f"Order Confirmation for {product} - Placed on {st.session_state.simulation_day.strftime('%Y-%m-%d')}"
+                    msg['From'] = "supplier123.sample@gmail.com"
+                    msg['To'] = "supplier123.sample@gmail.com"
+
+                    try:
+                        with smtplib.SMTP("smtp.gmail.com", 587) as server:
+                            server.starttls()
+                            server.login("supplier123.sample@gmail.com", "vgdt fwsr yffb dbfr")
+                            server.send_message(msg)
+                        st.success(f"Order confirmation email sent for {product} to {selection}!")
+                    except Exception as e:
+                        st.error(f"Failed to send order confirmation email for {product} to {selection}: {str(e)}")
+
                     st.rerun()
 
     # --- PROCUREMENT TRACKING ---
@@ -459,30 +491,6 @@ if st.session_state.day_started:
             .stDataEditor { border-collapse: collapse; width: 100%; }
             .stDataEditor th, .stDataEditor td { border: 1px solid black; padding: 8px; text-align: left; }
             .stDataEditor th { background-color: #f2f2f2; }
- worthy="false" class="stDataFrame" data-testid="stDataFrame" style="width: 100%;">
-<thead>
-<tr style="text-align: right;">
-<th></th>
-<th>Product</th>
-<th>Supplier</th>
-<th>Units Ordered</th>
-<th>Rate per Unit</th>
-<th>Total Cost</th>
-<th>Order_Date</th>
-<th>Promised Days</th>
-<th>Promised_Date</th>
-<th>Lead_Time_days</th>
-<th>Lead_Time_Date</th>
-<th>Order_Placed</th>
-<th>Days Left</th>
-<th>Status</th>
-<th>Received</th>
-</tr>
-</thead>
-<tbody>
-</tbody>
-</table>
-</div>
             .overdue { background-color: #ffcccc; color: red; animation: blink 1s infinite; }
             .warning-box { background-color: #fff3cd; border-left: 5px solid #ffc107; padding: 10px; margin: 10px 0; }
         </style>
@@ -548,7 +556,7 @@ if st.session_state.day_started:
                                 for _, row in overdue_orders.iterrows()]) + """
                 </ul>
             </div>
-            """, unsafe_allow_html=True)
+           3123""", unsafe_allow_html=True)
 
         def style_procurement_row(row):
             styles = [''] * len(row)
