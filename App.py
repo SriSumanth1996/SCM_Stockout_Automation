@@ -90,13 +90,20 @@ for key, value in {
     'last_user_input': None,
     'show_chat': False,
     'last_intent': None,
-    'last_product': None
+    'last_product': None,
+    'proc_chat_history': [],
+    'proc_chat_input_counter': 0,
+    'proc_last_user_input': None,
+    'show_proc_chat': False,
+    'proc_last_intent': None,
+    'proc_last_product': None
 }.items():
     if key not in st.session_state:
         st.session_state[key] = value
 
 # Title
 st.title(f"🛒 Product Ordering App - {st.session_state.simulation_day.strftime('%Y-%m-%d')}")
+
 
 # --- CUSTOMER CHATBOT ---
 def process_query(query, stock_df, base_prices, units, product_descriptions, client):
@@ -206,6 +213,289 @@ def process_query(query, stock_df, base_prices, units, product_descriptions, cli
         st.error(f"Groq API error: {str(e)}. Please check your API key or network connection.")
         return "Sorry, I'm having trouble processing your query. Please try again!", "unclear", None
 
+
+
+# --- PROCUREMENT CHATBOT ---
+def process_procurement_query(query, stock_df, supplier_quotes, procurement_orders, supplier_performance, base_prices, units, client):
+    """Process procurement query with Groq's Models, highly context-aware for supply chain queries."""
+    if not query.strip():
+        return None, None, None, None
+
+    products = stock_df['Product'].tolist()
+    stock_info = stock_df.set_index('Product')[['Available_Stock', 'ROL', 'Max_Stock']].to_dict('index')
+    context = {
+        'products': products,
+        'units': units,
+        'stock_info': stock_info,
+        'supplier_quotes': supplier_quotes,
+        'procurement_orders': [
+            {
+                'Product': order['Product'],
+                'Supplier': order['Supplier'],
+                'Units Ordered': order['Units Ordered'],
+                'Order_Date': order['Order_Date'].strftime('%Y-%m-%d'),
+                'Promised_Date': order['Promised_Date'].strftime('%Y-%m-%d'),
+                'Received': order['Received']
+            } for order in procurement_orders
+        ],
+        'supplier_performance': {
+            supplier: {
+                product: {
+                    'avg_delay': round(metrics['total_delay'] / metrics['count'], 2) if metrics['count'] > 0 else 0,
+                    'avg_price': round(metrics['total_price'] / metrics['count'], 2) if metrics['count'] > 0 else 0,
+                    'base_price': metrics['base_price'],
+                    'order_count': metrics['count']
+                } for product, metrics in products.items()
+            } for supplier, products in supplier_performance.items()
+        }
+    }
+
+    # Build chat history for context (last 5 exchanges)
+    chat_history = st.session_state.proc_chat_history[-5:]
+    history_text = ""
+    for chat in chat_history:
+        if chat['user'] and chat['bot'] and chat['intent'] != "farewell":
+            history_text += f"User: {chat['user']}\nAssistant: {chat['bot']}\nIntent: {chat['intent']}\n"
+
+    last_intent = st.session_state.proc_last_intent
+    last_product = st.session_state.proc_last_product
+
+    prompt = f"""
+    You are a highly intelligent procurement assistant chatbot for Bitsom Gourmet, a grocery store. Your goal is to assist with all supply chain-related queries about products ({', '.join(products)}), including stock levels, reordering, supplier recommendations, supplier performance, and procurement orders. Respond in a professional, friendly, and concise tone. Use conversation history, last intent, and last product to maintain context, ensuring coherent and accurate responses for follow-up or ambiguous queries.
+
+    Context:
+    - Products: {json.dumps(products)}
+    - Units: {json.dumps(units)}
+    - Stock Info: {json.dumps(stock_info)}
+    - Supplier Quotes: {json.dumps(supplier_quotes)}
+    - Procurement Orders: {json.dumps(context['procurement_orders'])}
+    - Supplier Performance: {json.dumps(context['supplier_performance'])}
+    - Last Intent: {json.dumps(last_intent)}
+    - Last Product: {json.dumps(last_product)}
+
+    Conversation History:
+    {history_text}
+
+    Intents to detect:
+    - stock_status: Asking about inventory levels for a product (e.g., "What's the stock for Milk?")
+    - reorder_suggestion: Asking if a product needs reordering (e.g., "Should I reorder Paneer?")
+    - supplier_recommendation: Asking for the best supplier for a product (e.g., "Which supplier for Milk?" or "Should I order from Supplier A?")
+    - supplier_performance: Asking about a supplier's performance for a specific product (e.g., "How reliable is Supplier A for Milk?")
+    - general_supplier_performance: Asking about a supplier's overall performance (e.g., "How is Supplier A performing?")
+    - suppliers: Asking for a list of suppliers for a product (e.g., "Who are the suppliers for Milk?")
+    - procurement_status: Asking about pending or recent orders (e.g., "Any orders for Potatoes?")
+    - below_rol: Asking for products below ROL (e.g., "What products are below ROL?")
+    - at_rol: Asking for products at ROL (e.g., "Which products are at ROL?")
+    - attention_needed: Asking for products needing attention (e.g., "What products need attention today?") - includes products at or below ROL
+    - explain_rol: Asking what ROL is (e.g., "What is ROL?")
+    - lead_time: Asking about lead time for a product (e.g., "What's the lead time for Oil?")
+    - stock_out_risk: Asking about risk of stock-out (e.g., "Which products might run out soon?")
+    - order_cost: Asking about cost of ordering a product (e.g., "How much to order 100 packets of Milk?")
+    - supplier_contact: Asking for supplier contact details (e.g., "How do I contact Supplier A?")
+    - greeting: Casual greetings (e.g., "Hello")
+    - unclear: Ambiguous or unrelated queries
+
+    Instructions:
+    - Identify the product (case-insensitive), supplier (e.g., 'Supplier A', 'A'), and intent from the query.
+    - Use correct units (from Units) for quantities (e.g., 'packets' for Milk, 'kgs' for Oil).
+    - For 'stock_status', provide current stock, ROL, and status (e.g., "Milk: 25 packets, ROL: 60 packets, Below Reorder Level").
+    - For 'reorder_suggestion', if stock is at/below ROL, suggest ordering (Max_Stock - Available_Stock) units, recommending the cheapest supplier if available. If sufficient, say no reorder needed.
+    - For 'supplier_recommendation', if a supplier is specified, evaluate their rate and delay history; if delays >2 days, caution and suggest the next best supplier (lowest rate or fastest delivery). If no supplier specified, recommend the cheapest.
+    - For 'suppliers', list suppliers from supplier_quotes with rate, total cost, and promised days. If no product specified, use Last Product or ask for clarification.
+    - For 'procurement_status', list pending orders for the product with supplier, units, order date, and promised date. If none, say "No pending orders."
+    - For 'below_rol', list products with Available_Stock < ROL as bullet points (e.g., "Milk: 25 packets, ROL: 60 packets, Below Reorder Level"). If none, say "No products are below ROL."
+    - For 'at_rol', list products with Available_Stock == ROL as bullet points. If none, say "No products are at ROL."
+    - For 'attention_needed', list products with Available_Stock <= ROL as bullet points. If none, say "No products require attention." If previous intent was 'below_rol', assume it refers to at/below ROL.
+    - For 'explain_rol', explain ROL as the stock level triggering a reorder, calculated as (Demand Rate per Day * Lead Time Days) + Minimum Level.
+    - For 'lead_time', provide the lead time for the product from stock_info (e.g., "Lead time for Oil is 7 days").
+    - For 'stock_out_risk', list products where Available_Stock / Demand_Rate_per_Day < Lead_Time_days, showing days until stock-out. If none, say "No immediate stock-out risks."
+    - For 'order_cost', calculate cost for the specified quantity using the cheapest supplier’s rate. If no quantity specified, use (Max_Stock - Available_Stock).
+    - For 'supplier_performance', provide average delay, order count, and price deviation from base price for the supplier/product.
+    - For 'general_supplier_performance', summarize supplier’s performance across all products (products supplied, average delay, average price deviation %).
+    - For 'supplier_contact', provide a placeholder email (e.g., "Contact Supplier A at supplierA@bitsomgourmet.com").
+    - For 'greeting', welcome and suggest asking about procurement tasks.
+    - For 'unclear', infer intent/product from history (e.g., "What about them?" after 'below_rol' refers to those products). Otherwise, ask for clarification.
+    - Reference prior exchanges naturally (e.g., "As we discussed about Milk...").
+    - If ambiguous, infer product from Last Product or history; for supplier queries, infer supplier (e.g., 'A' as 'Supplier A'); else, ask for clarification.
+    - Format lists (e.g., below_rol, suppliers) as bullet points for clarity.
+    - Return JSON: {{intent: string, product: string or null, supplier: string or null, response: string}}.
+
+    Current Query: "{query}"
+    """
+    try:
+        completion = client.chat.completions.create(
+            model="llama-3.1-8b-instant",
+            messages=[{"role": "user", "content": prompt}],
+            response_format={"type": "json_object"},
+            temperature=0.7,
+            max_tokens=400
+        )
+        result = json.loads(completion.choices[0].message.content)
+        response = result.get('response', "Sorry, I couldn't process that. Please try again!")
+        intent = result.get('intent', 'unclear')
+        product = result.get('product', None)
+        supplier = result.get('supplier', None)
+
+        # Validate responses
+        if intent == 'stock_status' and product and product in stock_df['Product'].values:
+            stock_row = stock_df[stock_df['Product'] == product].iloc[0]
+            unit = units.get(product, 'units')
+            status = "Below Reorder Level" if stock_row['Available_Stock'] < stock_row['ROL'] else "At Reorder Level" if stock_row['Available_Stock'] == stock_row['ROL'] else "Sufficient"
+            response = f"{product}: {stock_row['Available_Stock']} {unit}, ROL: {stock_row['ROL']} {unit}, {status}"
+
+        if intent == 'reorder_suggestion' and product and product in stock_df['Product'].values:
+            stock_row = stock_df[stock_df['Product'] == product].iloc[0]
+            unit = units.get(product, 'units')
+            if stock_row['Available_Stock'] <= stock_row['ROL']:
+                to_order = stock_row['Max_Stock'] - stock_row['Available_Stock']
+                response = f"{product} is at or below ROL ({stock_row['Available_Stock']} {unit} vs ROL {stock_row['ROL']} {unit}). Suggest ordering {to_order} {unit}."
+                if product in supplier_quotes and supplier_quotes[product]:
+                    best_supplier = sorted(supplier_quotes[product], key=lambda x: float(x['Rate per Unit (Rs.)'].strip('₹')))[0]
+                    response += f" Cheapest supplier: {best_supplier['Supplier']} at ₹{best_supplier['Rate per Unit (Rs.)'].strip('₹')} per {unit}."
+            else:
+                response = f"{product} stock is sufficient ({stock_row['Available_Stock']} {unit} vs ROL {stock_row['ROL']} {unit}). No reorder needed."
+
+        if intent == 'suppliers' and not product and last_product:
+            product = last_product
+        if intent == 'suppliers' and product and product in supplier_quotes and supplier_quotes[product]:
+            quotes = supplier_quotes[product]
+            unit = units.get(product, 'units')
+            response = f"Suppliers for {product}:\n" + "\n".join([
+                f"- {q['Supplier']}: ₹{q['Rate per Unit (Rs.)'].strip('₹')} per {unit}, Total ₹{q['Total Cost (Rs.)']:.2f}, {q['Promised Days']} days"
+                for q in quotes
+            ])
+        elif intent == 'suppliers' and (not product or product not in supplier_quotes or not supplier_quotes.get(product)):
+            response = f"No supplier information available for {product if product else 'that product'}. Please specify a product like Milk or Paneer."
+
+        if intent == 'procurement_status' and product:
+            orders = [o for o in procurement_orders if o['Product'] == product and not o['Received']]
+            if orders:
+                response = f"Pending orders for {product}:\n" + "\n".join([
+                    f"- {o['Supplier']}: {o['Units Ordered']} {units.get(product, 'units')}, Ordered {o['Order_Date'].strftime('%Y-%m-%d')}, Due {o['Promised_Date'].strftime('%Y-%m-%d')}"
+                    for o in orders
+                ])
+            else:
+                response = f"No pending orders for {product}."
+
+        if intent == 'below_rol':
+            below_rol = stock_df[stock_df['Available_Stock'] < stock_df['ROL']]
+            if below_rol.empty:
+                response = "No products are below ROL."
+            else:
+                response = "Products below ROL:\n" + "\n".join([
+                    f"- {row['Product']}: {row['Available_Stock']} {units.get(row['Product'], 'units')}, ROL: {row['ROL']} {units.get(row['Product'], 'units')}, Below Reorder Level"
+                    for _, row in below_rol.iterrows()
+                ])
+
+        if intent == 'at_rol':
+            at_rol = stock_df[stock_df['Available_Stock'] == stock_df['ROL']]
+            if at_rol.empty:
+                response = "No products are at ROL."
+            else:
+                response = "Products at ROL:\n" + "\n".join([
+                    f"- {row['Product']}: {row['Available_Stock']} {units.get(row['Product'], 'units')}, ROL: {row['ROL']} {units.get(row['Product'], 'units')}, At Reorder Level"
+                    for _, row in at_rol.iterrows()
+                ])
+
+        if intent == 'attention_needed':
+            attention_needed = stock_df[stock_df['Available_Stock'] <= stock_df['ROL']]
+            if attention_needed.empty:
+                response = "No products require attention."
+            else:
+                response = "Products needing attention (at or below ROL):\n" + "\n".join([
+                    f"- {row['Product']}: {row['Available_Stock']} {units.get(row['Product'], 'units')}, ROL: {row['ROL']} {units.get(row['Product'], 'units')}, {'Below Reorder Level' if row['Available_Stock'] < row['ROL'] else 'At Reorder Level'}"
+                    for _, row in attention_needed.iterrows()
+                ])
+            if last_intent == 'below_rol':
+                response = f"As we discussed, here are the products needing attention (at or below ROL):\n{response}"
+
+        if intent == 'explain_rol':
+            response = "ROL (Reorder Level) is the stock level at which you should place a new order to avoid running out. It’s calculated as (Demand Rate per Day * Lead Time Days) + Minimum Level, ensuring enough stock during delivery lead time plus a safety buffer."
+
+        if intent == 'lead_time' and product and product in stock_df['Product'].values:
+            lead_time = stock_df[stock_df['Product'] == product]['Lead_Time_days'].iloc[0]
+            response = f"The lead time for {product} is {lead_time} days."
+
+        if intent == 'stock_out_risk':
+            risks = stock_df[stock_df['Available_Stock'] / stock_df['Demand_Rate_per_Day'] < stock_df['Lead_Time_days']]
+            if risks.empty:
+                response = "No immediate stock-out risks."
+            else:
+                response = "Products at risk of stock-out:\n" + "\n".join([
+                    f"- {row['Product']}: {row['Available_Stock']} {units.get(row['Product'], 'units')}, will run out in ~{row['Available_Stock'] / row['Demand_Rate_per_Day']:.1f} days (Lead Time: {row['Lead_Time_days']} days)"
+                    for _, row in risks.iterrows()
+                ])
+
+        if intent == 'order_cost' and product and product in supplier_quotes and supplier_quotes[product]:
+            quantity = None
+            for word in query.split():
+                try:
+                    quantity = int(word)
+                    break
+                except ValueError:
+                    continue
+            if not quantity:
+                stock_row = stock_df[stock_df['Product'] == product].iloc[0]
+                quantity = stock_row['Max_Stock'] - stock_row['Available_Stock'] if stock_row['Available_Stock'] <= stock_row['ROL'] else 0
+            if quantity > 0:
+                best_supplier = sorted(supplier_quotes[product], key=lambda x: float(x['Rate per Unit (Rs.)'].strip('₹')))[0]
+                rate = float(best_supplier['Rate per Unit (Rs.)'].strip('₹'))
+                unit = units.get(product, 'units')
+                response = f"Ordering {quantity} {unit} of {product} from {best_supplier['Supplier']} costs ₹{quantity * rate:.2f} at ₹{rate} per {unit}."
+            else:
+                response = f"No reorder needed for {product} unless specified. Please provide a quantity (e.g., 'How much to order 100 packets of Milk?')."
+
+        if intent == 'supplier_performance' and product and supplier and supplier in supplier_performance and product in supplier_performance[supplier]:
+            metrics = supplier_performance[supplier][product]
+            base_price = base_prices.get(product, metrics['base_price'])
+            price_deviation = ((metrics['total_price'] / metrics['count'] - base_price) / base_price * 100) if metrics['count'] > 0 and base_price > 0 else 0
+            response = f"Performance of {supplier} for {product}:\n" + "\n".join([
+                f"- Orders: {metrics['count']}",
+                f"- Average Delay: {round(metrics['total_delay'] / metrics['count'], 2) if metrics['count'] > 0 else 0} days",
+                f"- Average Price: ₹{round(metrics['total_price'] / metrics['count'], 2) if metrics['count'] > 0 else 0} (Base: ₹{base_price}, {price_deviation:+.2f}% deviation)"
+            ])
+        elif intent == 'supplier_performance' and product and supplier:
+            response = f"No performance data available for {supplier} supplying {product}."
+
+        if intent == 'general_supplier_performance' and supplier:
+            if supplier not in supplier_performance:
+                response = f"No performance data available for {supplier}."
+            else:
+                products_supplied = list(supplier_performance[supplier].keys())
+                total_orders = sum(metrics['count'] for metrics in supplier_performance[supplier].values())
+                total_delay = sum(metrics['total_delay'] for metrics in supplier_performance[supplier].values())
+                total_price = sum(metrics['total_price'] for metrics in supplier_performance[supplier].values())
+                avg_delay = round(total_delay / total_orders, 2) if total_orders > 0 else 0
+                price_deviations = []
+                for prod in products_supplied:
+                    metrics = supplier_performance[supplier][prod]
+                    base_price = base_prices.get(prod, metrics['base_price'])
+                    if base_price > 0 and metrics['count'] > 0:
+                        deviation = ((metrics['total_price'] / metrics['count'] - base_price) / base_price * 100)
+                        price_deviations.append(deviation * metrics['count'])
+                avg_price_deviation = round(sum(price_deviations) / total_orders, 2) if total_orders > 0 and price_deviations else 0
+                response = f"Performance summary for {supplier}:\n" + "\n".join([
+                    f"- Products Supplied: {', '.join(products_supplied)}",
+                    f"- Total Orders: {total_orders}",
+                    f"- Average Delay: {avg_delay} days",
+                    f"- Average Price Deviation: {avg_price_deviation:+.2f}% from base prices"
+                ])
+
+        if intent == 'supplier_contact' and supplier:
+            supplier_email = f"{supplier.lower().replace(' ', '')}@bitsomgourmet.com"
+            response = f"Contact {supplier} at {supplier_email}."
+
+        # Fallback for ambiguous queries
+        if not product and intent in ['stock_status', 'suppliers', 'procurement_status', 'reorder_suggestion', 'supplier_recommendation', 'lead_time', 'order_cost'] and last_product:
+            product = last_product
+            response = f"Assuming you mean {last_product}: {response}"
+
+        return response, intent, product, supplier
+    except Exception as e:
+        st.error(f"Groq API error: {str(e)}. Please check your API key or network connection.")
+        return "Sorry, I'm having trouble processing your query. Please try again!", "unclear", None, None
+
+# --- SIDEBAR: CUSTOMER SUPPORT ---
 st.sidebar.header("💬 Customer Support")
 if st.sidebar.button("Chat with Us", key="chat_toggle"):
     st.session_state.show_chat = not st.session_state.show_chat
@@ -231,7 +521,7 @@ if st.sidebar.button("Chat with Us", key="chat_toggle"):
     st.rerun()
 
 with st.sidebar:
-    with st.expander("Chat Window", expanded=st.session_state.show_chat):
+    with st.expander("Customer Chat Window", expanded=st.session_state.show_chat):
         st.markdown("""
             <style>
                 .farewell-message {
@@ -270,7 +560,7 @@ with st.sidebar:
                 st.rerun()
 
         if st.session_state.chat_history:
-            st.write("**Chat History**")
+            st.write("**Customer Chat History**")
             for chat in st.session_state.chat_history[-5:][::-1]:  # Reverse to show newest first
                 st.markdown(f"**You**: {chat['user']}")
                 st.markdown(f"**Assistant**: {chat['bot']}", unsafe_allow_html=True)
@@ -289,7 +579,98 @@ with st.sidebar:
             st.session_state.chat_history = []
             st.rerun()
 
-# --- SIMULATION CONTROL ---
+# --- SIDEBAR: PROCUREMENT ASSISTANT ---
+st.sidebar.header("🤝 Procurement Assistant")
+if st.sidebar.button("Procurement Chat", key="proc_chat_toggle"):
+    st.session_state.show_proc_chat = not st.session_state.show_proc_chat
+    if st.session_state.show_proc_chat:
+        st.session_state.proc_chat_history.append({
+            "user": "",
+            "bot": "Hello! I'm your procurement assistant. Ask about stock levels, supplier recommendations, or order status!",
+            "intent": "greeting",
+            "product": None
+        })
+        st.session_state.proc_last_intent = None
+        st.session_state.proc_last_product = None
+    else:
+        st.session_state.proc_chat_history.append({
+            "user": "",
+            "bot": "<div class='farewell-message'>! Thank you ! Have a good day !</div>",
+            "intent": "farewell",
+            "product": None
+        })
+        st.session_state.proc_last_intent = None
+        st.session_state.proc_last_product = None
+        st.session_state.proc_chat_history = []
+    st.rerun()
+
+with st.sidebar:
+    with st.expander("Procurement Chat Window", expanded=st.session_state.show_proc_chat):
+        st.markdown("""
+            <style>
+                .farewell-message {
+                    background-color: #e6ffe6;
+                    padding: 10px;
+                    border-radius: 5px;
+                    text-align: center;
+                    color: #28a745;
+                    font-weight: bold;
+                }
+            </style>
+        """, unsafe_allow_html=True)
+
+        proc_user_input = st.text_input(
+            "Ask about procurement...",
+            key=f"proc_chat_input_{st.session_state.proc_chat_input_counter}",
+            value=""
+        )
+
+        if proc_user_input and proc_user_input != st.session_state.proc_last_user_input:
+            st.session_state.proc_last_user_input = proc_user_input
+            response, intent, product, supplier = process_procurement_query(
+                proc_user_input,
+                st.session_state.stock,
+                st.session_state.supplier_quotes,
+                st.session_state.procurement_orders,
+                st.session_state.supplier_performance,
+                base_prices,
+                units,
+                client
+            )
+            if response:
+                st.session_state.proc_chat_history.append({
+                    "user": proc_user_input,
+                    "bot": response,
+                    "intent": intent,
+                    "product": product
+                })
+                st.session_state.proc_last_intent = intent
+                st.session_state.proc_last_product = product
+                st.session_state.proc_chat_input_counter += 1
+                st.session_state.proc_last_user_input = None
+                st.rerun()
+
+        if st.session_state.proc_chat_history:
+            st.write("**Procurement Chat History**")
+            for chat in st.session_state.proc_chat_history[-5:][::-1]:  # Reverse to show newest first
+                st.markdown(f"**You**: {chat['user']}")
+                st.markdown(f"**Assistant**: {chat['bot']}", unsafe_allow_html=True)
+                st.markdown("---")
+
+        if st.button("Close Procurement Chat", key=f"close_proc_chat_{st.session_state.update_trigger}"):
+            st.session_state.show_proc_chat = False
+            st.session_state.proc_chat_history.append({
+                "user": "",
+                "bot": "<div class='farewell-message'>! Thank you ! Have a good day !</div>",
+                "intent": "farewell",
+                "product": None
+            })
+            st.session_state.proc_last_intent = None
+            st.session_state.proc_last_product = None
+            st.session_state.proc_chat_history = []
+            st.rerun()
+
+# --- SIDEBAR: SIMULATION CONTROL ---
 st.sidebar.header("📆 Start your day!")
 if st.sidebar.button("Start Day"):
     st.session_state.day_started = True
@@ -315,7 +696,8 @@ if st.session_state.day_started:
     qty = st.number_input(f"Enter quantity for {product} ({units[product]})", min_value=1, step=1)
 
     if st.button("Add to Order"):
-        available = st.session_state.stock.loc[st.session_state.stock['Product'] == product, 'Available_Stock'].values[0]
+        available = st.session_state.stock.loc[st.session_state.stock['Product'] == product, 'Available_Stock'].values[
+            0]
         if qty > available:
             st.error(f"Only {available} {units[product]} of {product} available.")
         else:
@@ -345,6 +727,7 @@ if st.session_state.day_started:
     # --- INVENTORY STATUS ---
     st.subheader(f"📦 Updated Inventory Schedule as on {st.session_state.simulation_day.strftime('%Y-%m-%d')}")
 
+
     def get_stock_status(row):
         if row['Available_Stock'] < row['ROL']:
             return 'Below Reorder Level'
@@ -352,15 +735,18 @@ if st.session_state.day_started:
             return 'At Reorder Level'
         return 'Sufficient Stock'
 
+
     def calculate_to_be_ordered(row):
         if row['Available_Stock'] <= row['ROL']:
             return row['Max_Stock'] - row['Available_Stock']
         return 'N/A'
 
+
     def calculate_time_to_stock_out(row):
         if row['Available_Stock'] <= row['ROL']:
             return f"{row['Available_Stock'] / row['Demand_Rate_per_Day']:.1f}"
         return 'N/A'
+
 
     def color_row(row):
         color = ''
@@ -369,6 +755,7 @@ if st.session_state.day_started:
         elif row['Stock_Status'] == 'At Reorder Level':
             color = 'background-color: orange; animation: blink 1s infinite;'
         return [color] * len(row)
+
 
     st.markdown("""<style>
         @keyframes blink {0% { opacity: 1; } 50% { opacity: 0.5; } 100% { opacity: 1; }}
@@ -406,7 +793,8 @@ if st.session_state.day_started:
                     for i in range(5):
                         supplier = f"Supplier {chr(65 + i)}"
                         rate = round(np.random.normal(mean_price, mean_price * 0.1), 2)
-                        promised_days = max(1, int(round(np.random.normal(row.Lead_Time_days, row.Lead_Time_days * 0.1))))
+                        promised_days = max(1,
+                                            int(round(np.random.normal(row.Lead_Time_days, row.Lead_Time_days * 0.1))))
                         quotes.append({
                             'Supplier': supplier,
                             'Rate per Unit (Rs.)': f"₹{rate:.2f}",
@@ -459,7 +847,8 @@ if st.session_state.day_started:
                         f"Please confirm receipt of this order and ensure timely delivery.\n\n"
                         f"Regards,\nBuyer"
                     )
-                    msg['Subject'] = f"Order Confirmation for {product} - Placed on {st.session_state.simulation_day.strftime('%Y-%m-%d')}"
+                    msg[
+                        'Subject'] = f"Order Confirmation for {product} - Placed on {st.session_state.simulation_day.strftime('%Y-%m-%d')}"
                     msg['From'] = "supplier123.sample@gmail.com"
                     msg['To'] = "supplier123.sample@gmail.com"
 
@@ -506,8 +895,8 @@ if st.session_state.day_started:
                 <strong>⚠️ DUE TODAY ALERT!</strong> The following orders are to be delivered today:
                 <ul>
             """ + "\n".join([
-                                f"<li>{row['Product']} from {row['Supplier']} (Ordered: {row['Order_Date'].strftime('%Y-%m-%d')}, Promised: {row['Promised_Date'].strftime('%Y-%m-%d')})</li>"
-                                for _, row in due_today_orders.iterrows()]) + """
+                f"<li>{row['Product']} from {row['Supplier']} (Ordered: {row['Order_Date'].strftime('%Y-%m-%d')}, Promised: {row['Promised_Date'].strftime('%Y-%m-%d')})</li>"
+                for _, row in due_today_orders.iterrows()]) + """
                 </ul>
             </div>
             """, unsafe_allow_html=True)
@@ -530,7 +919,8 @@ if st.session_state.day_started:
                         f"- Total Cost: {row['Total Cost']}\n\n"
                         f"Regards,\nBuyer"
                     )
-                    msg['Subject'] = f"Reminder for the {row['Product']} order placed on {row['Order_Date'].strftime('%Y-%m-%d')}"
+                    msg[
+                        'Subject'] = f"Reminder for the {row['Product']} order placed on {row['Order_Date'].strftime('%Y-%m-%d')}"
                     msg['From'] = "supplier123.sample@gmail.com"
                     msg['To'] = "supplier123.sample@gmail.com"
 
@@ -552,17 +942,19 @@ if st.session_state.day_started:
                 <strong>⚠️ OVERDUE ALERT!</strong> The following orders are overdue:
                 <ul>
             """ + "\n".join([
-                                f"<li>{row['Product']} from {row['Supplier']} (Ordered: {row['Order_Date'].strftime('%Y-%m-%d')}, Promised: {row['Promised_Date'].strftime('%Y-%m-%d')})</li>"
-                                for _, row in overdue_orders.iterrows()]) + """
+                f"<li>{row['Product']} from {row['Supplier']} (Ordered: {row['Order_Date'].strftime('%Y-%m-%d')}, Promised: {row['Promised_Date'].strftime('%Y-%m-%d')})</li>"
+                for _, row in overdue_orders.iterrows()]) + """
                 </ul>
             </div>
-           3123""", unsafe_allow_html=True)
+            """, unsafe_allow_html=True)
+
 
         def style_procurement_row(row):
             styles = [''] * len(row)
             if row['Status'] == "Overdue" and not row['Received']:
                 styles = ['background-color: #ffcccc; color: red; animation: blink 1s infinite;'] * len(row)
             return styles
+
 
         if not df_proc.empty:
             disabled_columns = ["Product", "Supplier", "Units Ordered", "Rate per Unit", "Total Cost",
