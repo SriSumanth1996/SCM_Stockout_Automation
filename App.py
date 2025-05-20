@@ -27,6 +27,42 @@ if not groq_api_key:
     """)
     st.stop()
 
+
+def calculate_supplier_performance(procurement_orders, base_prices, simulation_day):
+    supplier_performance = {}
+    min_date = simulation_day - timedelta(days=9)
+
+    for order in procurement_orders:
+        if order['Order_Date'] < min_date:
+            continue
+        supplier = order['Supplier']
+        product = order['Product']
+        delay_days = order.get('Days_Delay', 0)
+        price = float(order['Rate per Unit'].strip('₹'))
+        base_price = base_prices.get(product, 0)
+
+        if supplier not in supplier_performance:
+            supplier_performance[supplier] = {}
+
+        if product not in supplier_performance[supplier]:
+            supplier_performance[supplier][product] = {
+                'total_delay': 0,
+                'total_price': 0,
+                'count': 0,
+                'base_price': base_price
+            }
+
+        sp = supplier_performance[supplier][product]
+        sp['total_delay'] += delay_days
+        sp['total_price'] += price
+        sp['count'] += 1
+
+    return supplier_performance
+
+
+
+
+
 # Initialize Groq client
 try:
     client = Groq(api_key=groq_api_key)
@@ -402,7 +438,7 @@ def process_procurement_query(query, stock_df, supplier_quotes, procurement_orde
                         avg_delay = metrics['avg_delay']
                         if avg_delay > 0:
                             response += f" **Caution**: {supplier} has an average delay of {avg_delay:.2f} days for {product}."
-                            if avg_delay > 2:
+                            if avg_delay > 0:
                                 # Suggest next cheapest supplier
                                 next_best = [q for q in quotes if q['Supplier'] != supplier]
                                 if next_best:
@@ -717,6 +753,13 @@ st.sidebar.header("📆 Start your day!")
 if st.sidebar.button("Start Day"):
     st.session_state.day_started = True
     st.success(f"✅ Simulation Day Started: {st.session_state.simulation_day.strftime('%Y-%m-%d')}")
+    st.session_state.supplier_performance = calculate_supplier_performance(
+        st.session_state.procurement_orders,
+        base_prices,
+        st.session_state.simulation_day
+    )
+
+
 if st.sidebar.button("End Day"):
     ended_day = st.session_state.simulation_day
     st.session_state.simulation_day += timedelta(days=1)
