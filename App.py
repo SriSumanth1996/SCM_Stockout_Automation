@@ -104,7 +104,6 @@ for key, value in {
 # Title
 st.title(f"🛒 Product Ordering App - {st.session_state.simulation_day.strftime('%Y-%m-%d')}")
 
-
 # --- CUSTOMER CHATBOT ---
 def process_query(query, stock_df, base_prices, units, product_descriptions, client):
     """Process user query with Groq's Models, supporting multi-turn conversation."""
@@ -214,16 +213,13 @@ def process_query(query, stock_df, base_prices, units, product_descriptions, cli
         return "Sorry, I'm having trouble processing your query. Please try again!", "unclear", None
 
 
-# --- PROCUREMENT CHATBOT ---
-def process_procurement_query(query, stock_df, supplier_quotes, procurement_orders, supplier_performance, base_prices,
-                              units, client):
-    """Process procurement query with Groq's Models, with updated supplier recommendation logic."""
+def process_procurement_query(query, stock_df, supplier_quotes, procurement_orders, supplier_performance, base_prices, units, client):
+    """Process procurement query with Groq's Models, highly context-aware for supply chain queries."""
     if not query.strip():
         return None, None, None, None
 
     products = stock_df['Product'].tolist()
     stock_info = stock_df.set_index('Product')[['Available_Stock', 'ROL', 'Max_Stock']].to_dict('index')
-
     context = {
         'products': products,
         'units': units,
@@ -280,9 +276,9 @@ def process_procurement_query(query, stock_df, supplier_quotes, procurement_orde
     Intents to detect:
     - stock_status: Asking about inventory levels for a product (e.g., "What's the stock for Milk?")
     - reorder_suggestion: Asking if a product needs reordering (e.g., "Should I reorder Paneer?")
-    - supplier_recommendation: Asking for the best supplier for a product (e.g., "Which supplier for Milk?" or "Should I order from Supplier B?") - include historical delay data
-    - supplier_performance: Asking about a supplier's performance for a specific product (e.g., "How reliable is Supplier B for Milk?")
-    - general_supplier_performance: Asking about a supplier's overall performance (e.g., "How is Supplier B performing?")
+    - supplier_recommendation: Asking for the best supplier for a product (e.g., "Which supplier for Milk?" or "Should I order from Supplier A?"). If there is any historical delay for that Supplier from Supplier's performance report, then give your recommendation with that caution.
+    - supplier_performance: Asking about a supplier's performance for a specific product (e.g., "How reliable is Supplier A for Milk?")
+    - general_supplier_performance: Asking about a supplier's overall performance (e.g., "How is Supplier A performing?")
     - suppliers: Asking for a list of suppliers for a product (e.g., "Who are the suppliers for Milk?")
     - procurement_status: Asking about pending or recent orders (e.g., "Any orders for Potatoes?")
     - below_rol: Asking for products below ROL (e.g., "What products are below ROL?")
@@ -292,17 +288,17 @@ def process_procurement_query(query, stock_df, supplier_quotes, procurement_orde
     - lead_time: Asking about lead time for a product (e.g., "What's the lead time for Oil?")
     - stock_out_risk: Asking about risk of stock-out (e.g., "Which products might run out soon?")
     - order_cost: Asking about cost of ordering a product (e.g., "How much to order 100 packets of Milk?")
-    - supplier_contact: Asking for supplier contact details (e.g., "How do I contact Supplier B?")
+    - supplier_contact: Asking for supplier contact details (e.g., "How do I contact Supplier A?")
     - greeting: Casual greetings (e.g., "Hello")
     - unclear: Ambiguous or unrelated queries
 
     Instructions:
-    - Identify the product (case-insensitive), supplier (e.g., 'Supplier B', 'B'), and intent from the query.
+    - Identify the product (case-insensitive), supplier (e.g., 'Supplier A', 'A'), and intent from the query.
     - Use correct units (from Units) for quantities (e.g., 'packets' for Milk, 'kgs' for Oil).
     - For 'stock_status', provide current stock, ROL, and status (e.g., "Milk: 25 packets, ROL: 60 packets, Below Reorder Level").
     - For 'reorder_suggestion', if stock is at/below ROL, suggest ordering (Max_Stock - Available_Stock) units, recommending the cheapest supplier if available. If sufficient, say no reorder needed.
-    - For 'supplier_recommendation', if a supplier is specified, evaluate their rate and include historical delay data from supplier_performance. Suggest the next best supplier (lowest rate). If no supplier specified, recommend the cheapest supplier with delay data. If no performance data, note the lack of history.
-    - For 'suppliers', list suppliers from supplier_quotes with rate, total cost, and promised days. If no product specified, use Last Product or ask for clarification.
+    - For 'supplier_recommendation', if a supplier is specified, evaluate their rate and check supplier_performance for delays; if avg_delay > 2 days, caution and suggest the next cheapest supplier. If no supplier specified, recommend the cheapest supplier, noting any delays from performance data.
+    - For 'suppliers', use existing supplier quotes from Supplier Quotes if available for the product. If no quotes exist or stock is sufficient, generate fresh quotes only if needed (mean price from base_prices, normal distribution with 10% std dev, lead time from stock_df with 10% std dev, min 1 day). List suppliers with rates, total costs, and promised days as bullet points. Trigger the Supplier Quotes section to display the table for the product.
     - For 'procurement_status', list pending orders for the product with supplier, units, order date, and promised date. If none, say "No pending orders."
     - For 'below_rol', list products with Available_Stock < ROL as bullet points (e.g., "Milk: 25 packets, ROL: 60 packets, Below Reorder Level"). If none, say "No products are below ROL."
     - For 'at_rol', list products with Available_Stock == ROL as bullet points. If none, say "No products are at ROL."
@@ -313,13 +309,13 @@ def process_procurement_query(query, stock_df, supplier_quotes, procurement_orde
     - For 'order_cost', calculate cost for the specified quantity using the cheapest supplier’s rate. If no quantity specified, use (Max_Stock - Available_Stock).
     - For 'supplier_performance', provide average delay, order count, and price deviation from base price for the supplier/product.
     - For 'general_supplier_performance', summarize supplier’s performance across all products (products supplied, average delay, average price deviation %).
-    - For 'supplier_contact', provide a placeholder email (e.g., "Contact Supplier B at supplierB@bitsomgourmet.com").
+    - For 'supplier_contact', provide a placeholder email (e.g., "Contact Supplier A at supplierA@bitsomgourmet.com").
     - For 'greeting', welcome and suggest asking about procurement tasks.
     - For 'unclear', infer intent/product from history (e.g., "What about them?" after 'below_rol' refers to those products). Otherwise, ask for clarification.
     - Reference prior exchanges naturally (e.g., "As we discussed about Milk...").
-    - If ambiguous, infer product from Last Product or history; for supplier queries, infer supplier (e.g., 'B' as 'Supplier B'); else, ask for clarification.
+    - If ambiguous, infer product from Last Product or history; for supplier queries, infer supplier (e.g., 'A' as 'Supplier A'); else, ask for clarification.
     - Format lists (e.g., below_rol, suppliers) as bullet points for clarity.
-    - Return JSON: {{intent: string, product: string or null, supplier: string or null, response: string}}.
+    - Return JSON: {{intent: string, product: string or null, supplier: string or null, response: string, trigger_supplier_quotes: boolean}}.
 
     Current Query: "{query}"
     """
@@ -336,14 +332,14 @@ def process_procurement_query(query, stock_df, supplier_quotes, procurement_orde
         intent = result.get('intent', 'unclear')
         product = result.get('product', None)
         supplier = result.get('supplier', None)
+        trigger_supplier_quotes = result.get('trigger_supplier_quotes', False)
 
-        # Validate responses
+        # Validate and handle responses
         if intent == 'stock_status' and product and product in stock_df['Product'].values:
             stock_row = stock_df[stock_df['Product'] == product].iloc[0]
             unit = units.get(product, 'units')
-            status = "Below Reorder Level" if stock_row['Available_Stock'] < stock_row['ROL'] else "At Reorder Level" if \
-            stock_row['Available_Stock'] == stock_row['ROL'] else "Sufficient"
-            response = f"{product}: {stock_row['Available_Stock']} {unit}, ROL: {stock_row['ROL']} {unit}, {status}"
+            status = "Below Reorder Level" if stock_row['Available_Stock'] < stock_row['ROL'] else "At Reorder Level" if stock_row['Available_Stock'] == stock_row['ROL'] else "Sufficient"
+            response = f"{product}: {stock_row['Available_Stock']} {unit}, ROL: {row['ROL']} {unit}, {status}"
 
         if intent == 'reorder_suggestion' and product and product in stock_df['Product'].values:
             stock_row = stock_df[stock_df['Product'] == product].iloc[0]
@@ -352,24 +348,120 @@ def process_procurement_query(query, stock_df, supplier_quotes, procurement_orde
                 to_order = stock_row['Max_Stock'] - stock_row['Available_Stock']
                 response = f"{product} is at or below ROL ({stock_row['Available_Stock']} {unit} vs ROL {stock_row['ROL']} {unit}). Suggest ordering {to_order} {unit}."
                 if product in supplier_quotes and supplier_quotes[product]:
-                    best_supplier = \
-                    sorted(supplier_quotes[product], key=lambda x: float(x['Rate per Unit (Rs.)'].strip('₹')))[0]
+                    best_supplier = sorted(supplier_quotes[product], key=lambda x: float(x['Rate per Unit (Rs.)'].strip('₹')))[0]
                     response += f" Cheapest supplier: {best_supplier['Supplier']} at ₹{best_supplier['Rate per Unit (Rs.)'].strip('₹')} per {unit}."
             else:
                 response = f"{product} stock is sufficient ({stock_row['Available_Stock']} {unit} vs ROL {stock_row['ROL']} {unit}). No reorder needed."
 
         if intent == 'suppliers' and not product and last_product:
             product = last_product
-        if intent == 'suppliers' and product and product in supplier_quotes and supplier_quotes[product]:
-            quotes = supplier_quotes[product]
+        if intent == 'suppliers' and product and product in stock_df['Product'].values:
+            stock_row = stock_df[stock_df['Product'] == product].iloc[0]
             unit = units.get(product, 'units')
-            response = f"Suppliers for {product}:\n" + "\n".join([
-                f"- {q['Supplier']}: ₹{q['Rate per Unit (Rs.)'].strip('₹')} per {unit}, Total ₹{q['Total Cost (Rs.)']:.2f}, {q['Promised Days']} days"
-                for q in quotes
-            ])
-        elif intent == 'suppliers' and (
-                not product or product not in supplier_quotes or not supplier_quotes.get(product)):
+            to_order = stock_row['Max_Stock'] - stock_row['Available_Stock']
+            if to_order > 0 and stock_row['Available_Stock'] <= stock_row['ROL']:
+                # Use existing supplier quotes if available
+                if product in supplier_quotes and supplier_quotes[product]:
+                    quotes = supplier_quotes[product]
+                else:
+                    # Generate fresh supplier quotes only if none exist
+                    mean_price = base_prices[product]
+                    lead_time_days = stock_row['Lead_Time_days']
+                    quotes = []
+                    for i in range(5):
+                        supplier_name = f"Supplier {chr(65 + i)}"
+                        rate = round(np.random.normal(mean_price, mean_price * 0.1), 2)
+                        promised_days = max(1, int(round(np.random.normal(lead_time_days, lead_time_days * 0.1))))
+                        quotes.append({
+                            'Supplier': supplier_name,
+                            'Rate per Unit (Rs.)': f"₹{rate:.2f}",
+                            'To be Ordered': to_order,
+                            'Total Cost (Rs.)': rate * to_order,
+                            'Promised Days': promised_days
+                        })
+                    st.session_state.supplier_quotes[product] = sorted(quotes, key=lambda x: x['Total Cost (Rs.)'])
+                    quotes = st.session_state.supplier_quotes[product]
+                response = f"Suppliers for {product}:\n" + "\n".join([
+                    f"- {q['Supplier']}: ₹{q['Rate per Unit (Rs.)'].strip('₹')} per {unit}, Total ₹{q['Total Cost (Rs.)']:.2f}, {q['Promised Days']} days"
+                    for q in quotes
+                ])
+                trigger_supplier_quotes = True
+            else:
+                response = f"No supplier quotes needed for {product} as stock is sufficient or no reorder is required."
+                trigger_supplier_quotes = False
+        elif intent == 'suppliers' and (not product or product not in stock_df['Product'].values):
             response = f"No supplier information available for {product if product else 'that product'}. Please specify a product like Milk or Paneer."
+            trigger_supplier_quotes = False
+
+        if intent == 'supplier_recommendation' and product and product in stock_df['Product'].values:
+            stock_row = stock_df[stock_df['Product'] == product].iloc[0]
+            unit = units.get(product, 'units')
+            to_order = stock_row['Max_Stock'] - stock_row['Available_Stock']
+            if to_order > 0 and stock_row['Available_Stock'] <= stock_row['ROL']:
+                # Use existing supplier quotes if available
+                if product in supplier_quotes and supplier_quotes[product]:
+                    quotes = supplier_quotes[product]
+                else:
+                    # Generate fresh supplier quotes
+                    mean_price = base_prices[product]
+                    lead_time_days = stock_row['Lead_Time_days']
+                    quotes = []
+                    for i in range(5):
+                        supplier_name = f"Supplier {chr(65 + i)}"
+                        rate = round(np.random.normal(mean_price, mean_price * 0.1), 2)
+                        promised_days = max(1, int(round(np.random.normal(lead_time_days, lead_time_days * 0.1))))
+                        quotes.append({
+                            'Supplier': supplier_name,
+                            'Rate per Unit (Rs.)': f"₹{rate:.2f}",
+                            'To be Ordered': to_order,
+                            'Total Cost (Rs.)': rate * to_order,
+                            'Promised Days': promised_days
+                        })
+                    st.session_state.supplier_quotes[product] = sorted(quotes, key=lambda x: x['Total Cost (Rs.)'])
+                    quotes = st.session_state.supplier_quotes[product]
+
+                if supplier and supplier in [q['Supplier'] for q in quotes]:
+                    # Check supplier performance for delays
+                    selected_quote = [q for q in quotes if q['Supplier'] == supplier][0]
+                    rate = float(selected_quote['Rate per Unit (Rs.)'].strip('₹'))
+                    response = f"{supplier} offers {product} at ₹{rate:.2f} per {unit}, Total ₹{rate * to_order:.2f} for {to_order} {unit}."
+                    if supplier in supplier_performance and product in supplier_performance[supplier]:
+                        metrics = supplier_performance[supplier][product]
+                        avg_delay = metrics['avg_delay']
+                        if avg_delay > 0:
+                            response += f" **Caution**: {supplier} has an average delay of {avg_delay:.2f} days for {product}."
+                            if avg_delay > 2:
+                                # Suggest next cheapest supplier
+                                next_best = [q for q in quotes if q['Supplier'] != supplier]
+                                if next_best:
+                                    next_quote = sorted(next_best, key=lambda x: float(x['Rate per Unit (Rs.)'].strip('₹')))[0]
+                                    next_rate = float(next_quote['Rate per Unit (Rs.)'].strip('₹'))
+                                    response += f" Consider {next_quote['Supplier']} at ₹{next_rate:.2f} per {unit} for potentially faster delivery."
+                    else:
+                        response += f" No delay data available for {supplier}."
+                else:
+                    # Recommend cheapest supplier
+                    best_quote = quotes[0]
+                    best_supplier = best_quote['Supplier']
+                    rate = float(best_quote['Rate per Unit (Rs.)'].strip('₹'))
+                    response = f"Recommended: {best_supplier} for {product} at ₹{rate:.2f} per {unit}, Total ₹{rate * to_order:.2f} for {to_order} {unit}."
+                    if best_supplier in supplier_performance and product in supplier_performance[best_supplier]:
+                        metrics = supplier_performance[best_supplier][product]
+                        avg_delay = metrics['avg_delay']
+                        if avg_delay > 0:
+                            response += f" **Caution**: {best_supplier} has an average delay of {avg_delay:.2f} days for {product}."
+                            if avg_delay > 2:
+                                next_best = [q for q in quotes if q['Supplier'] != best_supplier]
+                                if next_best:
+                                    next_quote = sorted(next_best, key=lambda x: float(x['Rate per Unit (Rs.)'].strip('₹')))[0]
+                                    next_rate = float(next_quote['Rate per Unit (Rs.)'].strip('₹'))
+                                    response += f" Consider {next_quote['Supplier']} at ₹{next_rate:.2f} per {unit} for potentially faster delivery."
+                    else:
+                        response += f" No delay data available for {best_supplier}."
+                trigger_supplier_quotes = True
+            else:
+                response = f"No reorder needed for {product} as stock is sufficient."
+                trigger_supplier_quotes = False
 
         if intent == 'procurement_status' and product:
             orders = [o for o in procurement_orders if o['Product'] == product and not o['Received']]
@@ -440,23 +532,19 @@ def process_procurement_query(query, stock_df, supplier_quotes, procurement_orde
                     continue
             if not quantity:
                 stock_row = stock_df[stock_df['Product'] == product].iloc[0]
-                quantity = stock_row['Max_Stock'] - stock_row['Available_Stock'] if stock_row['Available_Stock'] <= \
-                                                                                    stock_row['ROL'] else 0
+                quantity = stock_row['Max_Stock'] - stock_row['Available_Stock'] if stock_row['Available_Stock'] <= stock_row['ROL'] else 0
             if quantity > 0:
-                best_supplier = \
-                sorted(supplier_quotes[product], key=lambda x: float(x['Rate per Unit (Rs.)'].strip('₹')))[0]
+                best_supplier = sorted(supplier_quotes[product], key=lambda x: float(x['Rate per Unit (Rs.)'].strip('₹')))[0]
                 rate = float(best_supplier['Rate per Unit (Rs.)'].strip('₹'))
                 unit = units.get(product, 'units')
                 response = f"Ordering {quantity} {unit} of {product} from {best_supplier['Supplier']} costs ₹{quantity * rate:.2f} at ₹{rate} per {unit}."
             else:
                 response = f"No reorder needed for {product} unless specified. Please provide a quantity (e.g., 'How much to order 100 packets of Milk?')."
 
-        if intent == 'supplier_performance' and product and supplier and supplier in supplier_performance and product in \
-                supplier_performance[supplier]:
+        if intent == 'supplier_performance' and product and supplier and supplier in supplier_performance and product in supplier_performance[supplier]:
             metrics = supplier_performance[supplier][product]
             base_price = base_prices.get(product, metrics['base_price'])
-            price_deviation = ((metrics['total_price'] / metrics['count'] - base_price) / base_price * 100) if metrics[
-                                                                                                                   'count'] > 0 and base_price > 0 else 0
+            price_deviation = ((metrics['total_price'] / metrics['count'] - base_price) / base_price * 100) if metrics['count'] > 0 and base_price > 0 else 0
             response = f"Performance of {supplier} for {product}:\n" + "\n".join([
                 f"- Orders: {metrics['count']}",
                 f"- Average Delay: {round(metrics['total_delay'] / metrics['count'], 2) if metrics['count'] > 0 else 0} days",
@@ -481,8 +569,7 @@ def process_procurement_query(query, stock_df, supplier_quotes, procurement_orde
                     if base_price > 0 and metrics['count'] > 0:
                         deviation = ((metrics['total_price'] / metrics['count'] - base_price) / base_price * 100)
                         price_deviations.append(deviation * metrics['count'])
-                avg_price_deviation = round(sum(price_deviations) / total_orders,
-                                            2) if total_orders > 0 and price_deviations else 0
+                avg_price_deviation = round(sum(price_deviations) / total_orders, 2) if total_orders > 0 and price_deviations else 0
                 response = f"Performance summary for {supplier}:\n" + "\n".join([
                     f"- Products Supplied: {', '.join(products_supplied)}",
                     f"- Total Orders: {total_orders}",
@@ -494,124 +581,18 @@ def process_procurement_query(query, stock_df, supplier_quotes, procurement_orde
             supplier_email = f"{supplier.lower().replace(' ', '')}@bitsomgourmet.com"
             response = f"Contact {supplier} at {supplier_email}."
 
-        if intent == 'supplier_recommendation' and product and product in supplier_quotes and supplier_quotes[product]:
-            quotes = sorted(supplier_quotes[product], key=lambda x: float(x['Rate per Unit (Rs.)'].strip('₹')))
-            unit = units.get(product, 'units')
-            stock_row = stock_df[stock_df['Product'] == product].iloc[0]
-            to_order = stock_row['Max_Stock'] - stock_row['Available_Stock'] if stock_row['Available_Stock'] <= \
-                                                                                stock_row['ROL'] else 180
-
-            if supplier:  # Specific supplier mentioned
-                supplier = supplier if supplier.startswith('Supplier') else f"Supplier {supplier}"
-                supplier_quote = next((q for q in quotes if q['Supplier'] == supplier), None)
-                if supplier_quote:
-                    rate = float(supplier_quote['Rate per Unit (Rs.)'].strip('₹'))
-                    days = supplier_quote['Promised Days']
-                    total_cost = rate * to_order
-
-                    # Check supplier performance data
-                    avg_delay = 0
-                    if supplier in supplier_performance and product in supplier_performance[supplier]:
-                        metrics = supplier_performance[supplier][product]
-                        avg_delay = round(metrics['total_delay'] / metrics['count'], 2) if metrics['count'] > 0 else 0
-
-                    response = f"Ordering {to_order} {unit} of {product} from {supplier} costs ₹{total_cost:.2f} with delivery in {days} days."
-
-                    if avg_delay > 0:
-                        response += f" Historical data shows an average delay of {avg_delay} days for {product}."
-                    else:
-                        response += " No historical delay data available for this supplier with this product."
-
-                    # Suggest alternatives if available
-                    if len(quotes) > 1:
-                        alternatives = [q for q in quotes if q['Supplier'] != supplier]
-                        if alternatives:
-                            next_best = alternatives[0]
-                            next_rate = float(next_best['Rate per Unit (Rs.)'].strip('₹'))
-                            next_days = next_best['Promised Days']
-                            next_total_cost = next_rate * to_order
-                            next_delay = 0
-
-                            if next_best['Supplier'] in supplier_performance and product in supplier_performance[
-                                next_best['Supplier']]:
-                                next_metrics = supplier_performance[next_best['Supplier']][product]
-                                next_delay = round(next_metrics['total_delay'] / next_metrics['count'], 2) if \
-                                next_metrics['count'] > 0 else 0
-
-                            response += f" Alternatively, consider {next_best['Supplier']} at ₹{next_total_cost:.2f} for {to_order} {unit} with delivery in {next_days} days"
-                            if next_delay > 0:
-                                response += f" (average delay: {next_delay} days)."
-                            else:
-                                response += " (no delay data available)."
-                else:
-                    response = f"{supplier} is not available for {product}. "
-                    # Recommend the best available supplier
-                    best_supplier = quotes[0]['Supplier']
-                    rate = float(quotes[0]['Rate per Unit (Rs.)'].strip('₹'))
-                    days = quotes[0]['Promised Days']
-                    total_cost = rate * to_order
-
-                    # Check performance for best supplier
-                    avg_delay = 0
-                    if best_supplier in supplier_performance and product in supplier_performance[best_supplier]:
-                        metrics = supplier_performance[best_supplier][product]
-                        avg_delay = round(metrics['total_delay'] / metrics['count'], 2) if metrics['count'] > 0 else 0
-
-                    response += f"Recommend {best_supplier} at ₹{total_cost:.2f} for {to_order} {unit} with delivery in {days} days."
-
-                    if avg_delay > 0:
-                        response += f" Historical data shows an average delay of {avg_delay} days."
-                    else:
-                        response += " No historical delay data available."
-            else:  # No specific supplier mentioned
-                best_supplier = quotes[0]['Supplier']
-                rate = float(quotes[0]['Rate per Unit (Rs.)'].strip('₹'))
-                days = quotes[0]['Promised Days']
-                total_cost = rate * to_order
-
-                # Check performance for best supplier
-                avg_delay = 0
-                if best_supplier in supplier_performance and product in supplier_performance[best_supplier]:
-                    metrics = supplier_performance[best_supplier][product]
-                    avg_delay = round(metrics['total_delay'] / metrics['count'], 2) if metrics['count'] > 0 else 0
-
-                response = f"For {product}, I recommend {best_supplier} at ₹{total_cost:.2f} for {to_order} {unit} with delivery in {days} days."
-
-                if avg_delay > 0:
-                    response += f" Historical data shows an average delay of {avg_delay} days."
-                else:
-                    response += " No historical delay data available."
-
-                # Show alternatives if available
-                if len(quotes) > 1:
-                    next_best = quotes[1]
-                    next_rate = float(next_best['Rate per Unit (Rs.)'].strip('₹'))
-                    next_days = next_best['Promised Days']
-                    next_total_cost = next_rate * to_order
-                    next_delay = 0
-
-                    if next_best['Supplier'] in supplier_performance and product in supplier_performance[
-                        next_best['Supplier']]:
-                        next_metrics = supplier_performance[next_best['Supplier']][product]
-                        next_delay = round(next_metrics['total_delay'] / next_metrics['count'], 2) if next_metrics[
-                                                                                                          'count'] > 0 else 0
-
-                    response += f" Alternatively, {next_best['Supplier']} offers {to_order} {unit} at ₹{next_total_cost:.2f} with delivery in {next_days} days"
-                    if next_delay > 0:
-                        response += f" (average delay: {next_delay} days)."
-                    else:
-                        response += " (no delay data available)."
-
         # Fallback for ambiguous queries
-        if not product and intent in ['stock_status', 'suppliers', 'procurement_status', 'reorder_suggestion',
-                                      'supplier_recommendation', 'lead_time', 'order_cost'] and last_product:
+        if not product and intent in ['stock_status', 'suppliers', 'procurement_status', 'reorder_suggestion', 'supplier_recommendation', 'lead_time', 'order_cost'] and last_product:
             product = last_product
             response = f"Assuming you mean {last_product}: {response}"
+            if intent == 'suppliers':
+                trigger_supplier_quotes = True
 
-        return response, intent, product, supplier
+        return response, intent, product, supplier, trigger_supplier_quotes
     except Exception as e:
         st.error(f"Groq API error: {str(e)}. Please check your API key or network connection.")
-        return "Sorry, I'm having trouble processing your query. Please try again!", "unclear", None, None
+        return "Sorry, I'm having trouble processing your query. Please try again!", "unclear", None, None, False
+
 
 
 # --- SIDEBAR: CUSTOMER SUPPORT ---
@@ -746,7 +727,7 @@ with st.sidebar:
 
         if proc_user_input and proc_user_input != st.session_state.proc_last_user_input:
             st.session_state.proc_last_user_input = proc_user_input
-            response, intent, product, supplier = process_procurement_query(
+            response, intent, product, supplier, trigger_supplier_quotes = process_procurement_query(
                 proc_user_input,
                 st.session_state.stock,
                 st.session_state.supplier_quotes,
@@ -846,7 +827,6 @@ if st.session_state.day_started:
     # --- INVENTORY STATUS ---
     st.subheader(f"📦 Updated Inventory Schedule as on {st.session_state.simulation_day.strftime('%Y-%m-%d')}")
 
-
     def get_stock_status(row):
         if row['Available_Stock'] < row['ROL']:
             return 'Below Reorder Level'
@@ -854,18 +834,15 @@ if st.session_state.day_started:
             return 'At Reorder Level'
         return 'Sufficient Stock'
 
-
     def calculate_to_be_ordered(row):
         if row['Available_Stock'] <= row['ROL']:
             return row['Max_Stock'] - row['Available_Stock']
         return 'N/A'
 
-
     def calculate_time_to_stock_out(row):
         if row['Available_Stock'] <= row['ROL']:
             return f"{row['Available_Stock'] / row['Demand_Rate_per_Day']:.1f}"
         return 'N/A'
-
 
     def color_row(row):
         color = ''
@@ -874,7 +851,6 @@ if st.session_state.day_started:
         elif row['Stock_Status'] == 'At Reorder Level':
             color = 'background-color: orange; animation: blink 1s infinite;'
         return [color] * len(row)
-
 
     st.markdown("""<style>
         @keyframes blink {0% { opacity: 1; } 50% { opacity: 0.5; } 100% { opacity: 1; }}
@@ -903,25 +879,24 @@ if st.session_state.day_started:
                 product = row.Product
                 if st.session_state.order_placed.get(product, False):
                     continue
-                to_order = row.To_be_Ordered
-                if isinstance(to_order, str):
+                to_order = row.Max_Stock - row.Available_Stock  # Recalculate to ensure latest stock values
+                if isinstance(to_order, str) or to_order <= 0:
                     continue
-                if product not in st.session_state.supplier_quotes:
-                    mean_price = base_prices[product]
-                    quotes = []
-                    for i in range(5):
-                        supplier = f"Supplier {chr(65 + i)}"
-                        rate = round(np.random.normal(mean_price, mean_price * 0.1), 2)
-                        promised_days = max(1,
-                                            int(round(np.random.normal(row.Lead_Time_days, row.Lead_Time_days * 0.1))))
-                        quotes.append({
-                            'Supplier': supplier,
-                            'Rate per Unit (Rs.)': f"₹{rate:.2f}",
-                            'To be Ordered': to_order,
-                            'Total Cost (Rs.)': rate * to_order,
-                            'Promised Days': promised_days
-                        })
-                    st.session_state.supplier_quotes[product] = sorted(quotes, key=lambda x: x['Total Cost (Rs.)'])
+                # Generate fresh supplier quotes with updated to_order
+                mean_price = base_prices[product]
+                quotes = []
+                for i in range(5):
+                    supplier = f"Supplier {chr(65 + i)}"
+                    rate = round(np.random.normal(mean_price, mean_price * 0.1), 2)
+                    promised_days = max(1, int(round(np.random.normal(row.Lead_Time_days, row.Lead_Time_days * 0.1))))
+                    quotes.append({
+                        'Supplier': supplier,
+                        'Rate per Unit (Rs.)': f"₹{rate:.2f}",
+                        'To be Ordered': to_order,
+                        'Total Cost (Rs.)': rate * to_order,
+                        'Promised Days': promised_days
+                    })
+                st.session_state.supplier_quotes[product] = sorted(quotes, key=lambda x: x['Total Cost (Rs.)'])
                 df = pd.DataFrame(st.session_state.supplier_quotes[product])
                 selection = st.radio(f"Choose Supplier for {product}", df['Supplier'], key=f"select_{product}")
                 st.dataframe(df)
@@ -1067,13 +1042,11 @@ if st.session_state.day_started:
             </div>
             """, unsafe_allow_html=True)
 
-
         def style_procurement_row(row):
             styles = [''] * len(row)
             if row['Status'] == "Overdue" and not row['Received']:
                 styles = ['background-color: #ffcccc; color: red; animation: blink 1s infinite;'] * len(row)
             return styles
-
 
         if not df_proc.empty:
             disabled_columns = ["Product", "Supplier", "Units Ordered", "Rate per Unit", "Total Cost",
