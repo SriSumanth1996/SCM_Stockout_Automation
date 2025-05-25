@@ -199,7 +199,7 @@ def process_query(query, stock_df, base_prices, units, product_descriptions, cli
             model="llama-3.3-70b-versatile",
             messages=[{"role": "user", "content": prompt}],
             response_format={"type": "json_object"},
-            temperature=0.8,
+            temperature=0.6,
             max_tokens=200
         )
         result = json.loads(completion.choices[0].message.content)
