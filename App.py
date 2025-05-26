@@ -14,6 +14,7 @@ from faster_whisper import WhisperModel
 # Suppress Intel OpenMP warning
 os.environ['KMP_DUPLICATE_LIB_OK'] = 'True'
 
+
 # ---------------------------
 # Speech Recognition Setup
 # ---------------------------
@@ -21,66 +22,18 @@ os.environ['KMP_DUPLICATE_LIB_OK'] = 'True'
 def load_whisper_model():
     return WhisperModel("medium", device="cpu", compute_type="int8", download_root="models")
 
+
 def record_audio(duration=5, fs=16000):
     recording = sd.rec(int(duration * fs), samplerate=fs, channels=1, dtype='int16')
     sd.wait()
     wavio.write("temp_audio.wav", recording, fs, sampwidth=2)
     return "temp_audio.wav"
 
+
 def transcribe_audio(model, audio_path):
     segments, info = model.transcribe(audio_path, beam_size=5)
     return " ".join(segment.text for segment in segments).strip()
 
-# Helper function to retrieve relevant table context
-def retrieve_context(intent, product=None, supplier=None):
-    if intent == "availability" and product:
-        stock_row = st.session_state.stock[st.session_state.stock['Product'] == product]
-        if not stock_row.empty:
-            return stock_row.to_string(index=False)
-
-    elif intent == "supplier_recommendation" and product:
-        if product in st.session_state.supplier_quotes:
-            return pd.DataFrame(st.session_state.supplier_quotes[product]).to_string(index=False)
-
-    elif intent == "procurement_status" and product:
-        orders = [o for o in st.session_state.procurement_orders if o['Product'] == product]
-        if orders:
-            return pd.DataFrame(orders).to_string(index=False)
-
-    elif intent == "supplier_performance" and product and supplier:
-        perf = st.session_state.supplier_performance.get(supplier, {}).get(product, {})
-        if perf:
-            return str(perf)
-
-    elif intent in ["below_rol", "attention_needed"]:
-        below_rol = st.session_state.stock[st.session_state.stock['Stock_Status'] == 'Below Reorder Level']
-        if not below_rol.empty:
-            return below_rol[['Product', 'Available_Stock', 'ROL']].to_string(index=False)
-
-    elif intent == "at_rol":
-        at_rol = st.session_state.stock[st.session_state.stock['Stock_Status'] == 'At Reorder Level']
-        if not at_rol.empty:
-            return at_rol[['Product', 'Available_Stock', 'ROL']].to_string(index=False)
-
-    elif intent == "stock_out_risk":
-        risk_df = st.session_state.stock[
-            st.session_state.stock['Available_Stock'] / st.session_state.stock['Demand_Rate_per_Day'] < st.session_state.stock['Lead_Time_days']
-        ]
-        if not risk_df.empty:
-            return risk_df[['Product', 'Available_Stock', 'Demand_Rate_per_Day', 'Lead_Time_days']].to_string(index=False)
-
-    elif intent == "general_supplier_performance" and supplier:
-        perf_data = {}
-        for prod, metrics in st.session_state.supplier_performance.get(supplier, {}).items():
-            perf_data[prod] = {
-                'avg_delay': metrics['total_delay'] / metrics['count'] if metrics['count'] else 0,
-                'avg_price': metrics['total_price'] / metrics['count'] if metrics['count'] else 0,
-                'base_price': metrics['base_price'],
-                'order_count': metrics['count']
-            }
-        return json.dumps(perf_data, indent=2)
-
-    return ""
 
 # Get API key from Streamlit secrets or environment variable
 groq_api_key = st.secrets.get("GROQ_API_KEY")
@@ -100,6 +53,7 @@ if not groq_api_key:
     3. Replace `gsk_...YceG` with your full API key from Groq.
     """)
     st.stop()
+
 
 def calculate_supplier_performance(procurement_orders, base_prices, simulation_day):
     supplier_performance = {}
@@ -126,6 +80,7 @@ def calculate_supplier_performance(procurement_orders, base_prices, simulation_d
         sp['total_price'] += price
         sp['count'] += 1
     return supplier_performance
+
 
 # Initialize Groq client
 try:
@@ -206,28 +161,50 @@ st.title(f"🛒 Product Ordering App - {st.session_state.simulation_day.strftime
 # Load Whisper model once
 whisper_model = load_whisper_model()
 
+
 # --- CUSTOMER CHATBOT ---
 def process_query(query, stock_df, base_prices, units, product_descriptions, client):
     """Process user query with Groq's Models, supporting multi-turn conversation."""
     if not query.strip():
         return None, None, None
-
     products = stock_df['Product'].tolist()
     stock_info = stock_df.set_index('Product')[['Available_Stock', 'ROL']].to_dict('index')
-
-    # Retrieve relevant context based on intent
-    context = retrieve_context(intent, product=extract_product(query), supplier=None)
-
-    # Build prompt with context
+    context = {
+        'products': products,
+        'descriptions': product_descriptions,
+        'base_prices': base_prices,
+        'units': units,
+        'stock_info': stock_info
+    }
+    # Build chat history for context (last 5 exchanges)
+    chat_history = st.session_state.chat_history[-5:]
+    history_text = ""
+    for chat in chat_history:
+        if chat['user'] and chat['bot'] and chat['intent'] != "farewell":
+            history_text += f"User: {chat['user']}\nAssistant: {chat['bot']}\n"
+    # Use last_intent and last_product for context if available
     last_intent = st.session_state.last_intent
     last_product = st.session_state.last_product
-
     prompt = f"""
+    You are a friendly customer support chatbot for Bitsom Gourmet, a grocery store. Your goal is to assist users with queries about products ({', '.join(products)}), provide information, and guide them to place orders if needed. Respond in a casual, engaging, and respectable tone. Use the conversation history and last intent/product to interpret follow-up queries, ensuring coherent and context-aware responses.
     Context:
-    {context}
-
-    You are a friendly customer support chatbot for Bitsom Gourmet, a grocery store. Your goal is to assist users with queries about products ({', '.join(products)}), provide information, and guide them to place orders if needed. Respond in a casual, engaging, and respectable tone.
-
+    - Products: {json.dumps(products)}
+    - Descriptions: {json.dumps(product_descriptions)}
+    - Prices: {json.dumps(base_prices)}
+    - Units: {json.dumps(units)}
+    - Stock Info: {json.dumps(stock_info)}
+    - Last Intent: {json.dumps(last_intent)}
+    - Last Product: {json.dumps(last_product)}
+    Conversation History:
+    {history_text}
+    Intents to detect:
+    - description: Asking about a product (e.g., "Tell me about Paneer")
+    - availability: Checking stock (e.g., "Do you have Milk?")
+    - price: Asking cost (e.g., "How much is Onions?")
+    - greeting: Casual greetings (e.g., "Hello", "Hi")
+    - all_products: Listing products (e.g., "What items do you have?")
+    - delivery: Delivery info (e.g., "When can you deliver?")
+    - unclear: Ambiguous or unrelated (e.g., "What's up?")
     Instructions:
     - Identify the product (case-insensitive) and intent from the query.
     - Do not provide stock quantities unless explicitly asked.
@@ -244,7 +221,6 @@ def process_query(query, stock_df, base_prices, units, product_descriptions, cli
     - Return a JSON object with: intent (string), product (string or null), response (string).
     Current Query: "{query}"
     """
-
     try:
         completion = client.chat.completions.create(
             model="llama-3.3-70b-versatile",
@@ -284,13 +260,13 @@ def process_query(query, stock_df, base_prices, units, product_descriptions, cli
         st.error(f"Groq API error: {str(e)}. Please check your API key or network connection.")
         return "Sorry, I'm having trouble processing your query. Please try again!", "unclear", None
 
+
 # --- PROCUREMENT CHATBOT ---
 def process_procurement_query(query, stock_df, supplier_quotes, procurement_orders, supplier_performance, base_prices,
                               units, client, st):
     """Process procurement query with Groq's Models, highly context-aware for supply chain queries."""
     if not query.strip():
         return "Please enter a valid query.", "unclear", None, None, False
-
     # Ensure required libraries are available
     try:
         import json
@@ -433,9 +409,6 @@ def process_procurement_query(query, stock_df, supplier_quotes, procurement_orde
         supplier = result.get("supplier", supplier)
         trigger_supplier_quotes = result.get("trigger_supplier_quotes", False)
 
-        # Retrieve relevant context based on intent
-        context = retrieve_context(intent, product=product, supplier=supplier)
-
         # Update session state
         st.session_state.proc_last_intent = intent
         st.session_state.proc_last_product = product
@@ -443,6 +416,7 @@ def process_procurement_query(query, stock_df, supplier_quotes, procurement_orde
     except Exception as e:
         st.error(f"API Error: {str(e)}")
         return "Sorry, I'm having trouble processing your query. Please try again!", "unclear", None, None, False
+
 
 # --- SIDEBAR: CUSTOMER SUPPORT ---
 st.sidebar.header("💬 Customer Support")
@@ -696,7 +670,8 @@ if st.session_state.day_started:
     product = st.selectbox("Select Product", st.session_state.stock['Product'])
     qty = st.number_input(f"Enter quantity for {product} ({units[product]})", min_value=1, step=1)
     if st.button("Add to Order"):
-        available = st.session_state.stock.loc[st.session_state.stock['Product'] == product, 'Available_Stock'].values[0]
+        available = st.session_state.stock.loc[st.session_state.stock['Product'] == product, 'Available_Stock'].values[
+            0]
         if qty > available:
             st.error(f"Only {available} {units[product]} of {product} available.")
         else:
@@ -724,6 +699,8 @@ if st.session_state.day_started:
 
     # --- INVENTORY STATUS ---
     st.subheader(f"📦 Updated Inventory Schedule as on {st.session_state.simulation_day.strftime('%Y-%m-%d')}")
+
+
     def get_stock_status(row):
         if row['Available_Stock'] < row['ROL']:
             return 'Below Reorder Level'
@@ -731,15 +708,18 @@ if st.session_state.day_started:
             return 'At Reorder Level'
         return 'Sufficient Stock'
 
+
     def calculate_to_be_ordered(row):
         if row['Available_Stock'] <= row['ROL']:
             return row['Max_Stock'] - row['Available_Stock']
         return 'N/A'
 
+
     def calculate_time_to_stock_out(row):
         if row['Available_Stock'] <= row['ROL']:
             return f"{row['Available_Stock'] / row['Demand_Rate_per_Day']:.1f}"
         return 'N/A'
+
 
     def color_row(row):
         color = ''
@@ -748,6 +728,7 @@ if st.session_state.day_started:
         elif row['Stock_Status'] == 'At Reorder Level':
             color = 'background-color: orange; animation: blink 1s infinite;'
         return [color] * len(row)
+
 
     st.markdown("""<style>
         @keyframes blink {0% { opacity: 1; } 50% { opacity: 0.5; } 100% { opacity: 1; }}
@@ -844,7 +825,8 @@ if st.session_state.day_started:
                         f"Please confirm receipt of this order and ensure timely delivery.\n\n"
                         f"Regards,\nBuyer"
                     )
-                    msg['Subject'] = f"Order Confirmation for {product} - Placed on {st.session_state.simulation_day.strftime('%Y-%m-%d')}"
+                    msg[
+                        'Subject'] = f"Order Confirmation for {product} - Placed on {st.session_state.simulation_day.strftime('%Y-%m-%d')}"
                     msg['From'] = "supplier123.sample@gmail.com"
                     msg['To'] = "supplier123.sample@gmail.com"
                     try:
@@ -865,7 +847,8 @@ if st.session_state.day_started:
         df_proc['Days Left'] = df_proc.apply(
             lambda x: max(0, x['Promised Days'] - (st.session_state.simulation_day - x['Order_Date']).days), axis=1)
         df_proc['Status'] = df_proc.apply(
-            lambda x: "Overdue" if not x['Received'] and (st.session_state.simulation_day - x['Order_Date']).days > x['Promised Days'] else "", axis=1)
+            lambda x: "Overdue" if not x['Received'] and (st.session_state.simulation_day - x['Order_Date']).days > x[
+                'Promised Days'] else "", axis=1)
 
         st.markdown("""
         <style>
@@ -880,7 +863,8 @@ if st.session_state.day_started:
 
         due_today_orders = df_proc[(df_proc['Received'] == False) &
                                    (df_proc.apply(
-                                       lambda x: (st.session_state.simulation_day - x['Order_Date']).days == x['Promised Days'], axis=1))]
+                                       lambda x: (st.session_state.simulation_day - x['Order_Date']).days == x[
+                                           'Promised Days'], axis=1))]
         if not due_today_orders.empty:
             st.markdown("""
             <div class="warning-box">
@@ -911,7 +895,8 @@ if st.session_state.day_started:
                         f"- Total Cost: {row['Total Cost']}\n\n"
                         f"Regards,\nBuyer"
                     )
-                    msg['Subject'] = f"Reminder for the {row['Product']} order placed on {row['Order_Date'].strftime('%Y-%m-%d')}"
+                    msg[
+                        'Subject'] = f"Reminder for the {row['Product']} order placed on {row['Order_Date'].strftime('%Y-%m-%d')}"
                     msg['From'] = "supplier123.sample@gmail.com"
                     msg['To'] = "supplier123.sample@gmail.com"
                     try:
@@ -938,11 +923,13 @@ if st.session_state.day_started:
             </div>
             """, unsafe_allow_html=True)
 
+
         def style_procurement_row(row):
             styles = [''] * len(row)
             if row['Status'] == "Overdue" and not row['Received']:
                 styles = ['background-color: #ffcccc; color: red; animation: blink 1s infinite;'] * len(row)
             return styles
+
 
         disabled_columns = ["Product", "Supplier", "Units Ordered", "Rate per Unit", "Total Cost",
                             "Order_Date", "Promised Days", "Promised_Date", "Lead_Time_days",
