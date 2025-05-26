@@ -16,7 +16,6 @@ import wave
 # Suppress Intel OpenMP warning
 os.environ['KMP_DUPLICATE_LIB_OK'] = 'True'
 
-
 # ---------------------------
 # Speech Recognition Setup
 # ---------------------------
@@ -25,35 +24,19 @@ def load_whisper_model():
     return WhisperModel("medium", device="cpu", compute_type="int8", download_root="models")
 
 
-def record_audio(duration=5, fs=16000):
-    try:
-        # Try to use pyaudio
-        p = pyaudio.PyAudio()
-        stream = p.open(format=pyaudio.paInt16, channels=1, rate=fs, input=True, frames_per_buffer=1024)
-        frames = []
-        for i in range(int(fs / 1024 * duration)):
-            data = stream.read(1024)
-            frames.append(data)
-        stream.stop_stream()
-        stream.close()
-        p.terminate()
-        wf = wave.open("temp_audio.wav", 'wb')
-        wf.setnchannels(1)
-        wf.setsampwidth(p.get_sample_size(pyaudio.paInt16))
-        wf.setframerate(fs)
-        wf.writeframes(b''.join(frames))
-        wf.close()
-        return "temp_audio.wav"
-    except Exception as e:
-        # Fallback to st.audio if pyaudio fails
-        st.error(f"Failed to record audio using pyaudio: {str(e)}")
+def record_audio():
+    audio = st.audio("Click to record", format="audio/wav")
+    if audio:
+        # Process the recorded audio
+        return audio
+    else:
         return None
 
 
-def transcribe_audio(model, audio_path):
+def transcribe_audio(model, audio_bytes):
     try:
-        # Try to use your existing transcription code
-        segments, info = model.transcribe(audio_path, beam_size=5)
+        # Transcribe the audio bytes
+        segments, info = model.transcribe(audio_bytes, beam_size=5)
         return " ".join(segment.text for segment in segments).strip()
     except Exception as e:
         # Fallback to a simple error message if transcription fails
