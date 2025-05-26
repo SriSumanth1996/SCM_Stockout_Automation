@@ -24,14 +24,13 @@ def load_whisper_model():
     return WhisperModel("medium", device="cpu", compute_type="int8", download_root="models")
 
 
-def record_audio():
+def record_audio(duration=5):
     audio = st.audio("Click to record", format="audio/wav")
     if audio:
         # Process the recorded audio
         return audio
     else:
         return None
-
 
 def transcribe_audio(model, audio_bytes):
     try:
