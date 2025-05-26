@@ -4,3 +4,6 @@ numpy
 groq
 datetime
 fuzzywuzzy
+sounddevice
+wavio
+faster-whisper
