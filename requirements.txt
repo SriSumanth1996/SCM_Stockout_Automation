@@ -7,3 +7,5 @@ fuzzywuzzy
 sounddevice
 wavio
 faster-whisper
+pyaudio
+wave
