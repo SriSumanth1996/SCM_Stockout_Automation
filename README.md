@@ -5,3 +5,6 @@ datetime
 smtplib
 groq
 email
+faster_whisper
+sounddevice
+wavio
