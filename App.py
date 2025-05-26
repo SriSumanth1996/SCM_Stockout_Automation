@@ -7,6 +7,59 @@ from email.message import EmailMessage
 from groq import Groq
 import os
 import json
+import sounddevice as sd
+import wavio
+from faster_whisper import WhisperModel
+import pyaudio
+import wave
+
+# Suppress Intel OpenMP warning
+os.environ['KMP_DUPLICATE_LIB_OK'] = 'True'
+
+
+# ---------------------------
+# Speech Recognition Setup
+# ---------------------------
+@st.cache_resource
+def load_whisper_model():
+    return WhisperModel("medium", device="cpu", compute_type="int8", download_root="models")
+
+
+def record_audio(duration=5, fs=16000):
+    try:
+        # Try to use pyaudio
+        p = pyaudio.PyAudio()
+        stream = p.open(format=pyaudio.paInt16, channels=1, rate=fs, input=True, frames_per_buffer=1024)
+        frames = []
+        for i in range(int(fs / 1024 * duration)):
+            data = stream.read(1024)
+            frames.append(data)
+        stream.stop_stream()
+        stream.close()
+        p.terminate()
+        wf = wave.open("temp_audio.wav", 'wb')
+        wf.setnchannels(1)
+        wf.setsampwidth(p.get_sample_size(pyaudio.paInt16))
+        wf.setframerate(fs)
+        wf.writeframes(b''.join(frames))
+        wf.close()
+        return "temp_audio.wav"
+    except Exception as e:
+        # Fallback to st.audio if pyaudio fails
+        st.error(f"Failed to record audio using pyaudio: {str(e)}")
+        return None
+
+
+def transcribe_audio(model, audio_path):
+    try:
+        # Try to use your existing transcription code
+        segments, info = model.transcribe(audio_path, beam_size=5)
+        return " ".join(segment.text for segment in segments).strip()
+    except Exception as e:
+        # Fallback to a simple error message if transcription fails
+        st.error(f"Failed to transcribe audio: {str(e)}")
+        return None
+
 
 # Get API key from Streamlit secrets or environment variable
 groq_api_key = st.secrets.get("GROQ_API_KEY")
@@ -31,7 +84,6 @@ if not groq_api_key:
 def calculate_supplier_performance(procurement_orders, base_prices, simulation_day):
     supplier_performance = {}
     min_date = simulation_day - timedelta(days=9)
-
     for order in procurement_orders:
         if order['Order_Date'] < min_date:
             continue
@@ -40,10 +92,8 @@ def calculate_supplier_performance(procurement_orders, base_prices, simulation_d
         delay_days = order.get('Days_Delay', 0)
         price = float(order['Rate per Unit'].strip('₹'))
         base_price = base_prices.get(product, 0)
-
         if supplier not in supplier_performance:
             supplier_performance[supplier] = {}
-
         if product not in supplier_performance[supplier]:
             supplier_performance[supplier][product] = {
                 'total_delay': 0,
@@ -51,13 +101,12 @@ def calculate_supplier_performance(procurement_orders, base_prices, simulation_d
                 'count': 0,
                 'base_price': base_price
             }
-
         sp = supplier_performance[supplier][product]
         sp['total_delay'] += delay_days
         sp['total_price'] += price
         sp['count'] += 1
-
     return supplier_performance
+
 
 # Initialize Groq client
 try:
@@ -135,6 +184,10 @@ for key, value in {
 # Title
 st.title(f"🛒 Product Ordering App - {st.session_state.simulation_day.strftime('%Y-%m-%d')}")
 
+# Load Whisper model once
+whisper_model = load_whisper_model()
+
+
 # --- CUSTOMER CHATBOT ---
 def process_query(query, stock_df, base_prices, units, product_descriptions, client):
     """Process user query with Groq's Models, supporting multi-turn conversation."""
@@ -206,6 +259,7 @@ def process_query(query, stock_df, base_prices, units, product_descriptions, cli
         response = result.get('response', "Sorry, I couldn't process that. Please try again!")
         intent = result.get('intent', 'unclear')
         product = result.get('product', None)
+
         # Validate availability response in Python to ensure correctness
         if intent == 'availability' and product and product in stock_df['Product'].values:
             stock_row = stock_df[stock_df['Product'] == product].iloc[0]
@@ -214,11 +268,11 @@ def process_query(query, stock_df, base_prices, units, product_descriptions, cli
                 response = f"Yes, {product} is available!"
             elif not is_available and "is available" in response.lower():
                 response = f"Sorry, {product} is not available right now."
+
         # Fallback to last_product for relevant intents if product is None
         if not product and intent in ['price', 'availability', 'description'] and last_product:
             product = last_product
             response = f"Assuming you mean {last_product}: {response}"
-            # Re-validate for availability with last_product
             if intent == 'availability' and last_product in stock_df['Product'].values:
                 stock_row = stock_df[stock_df['Product'] == last_product].iloc[0]
                 is_available = stock_row['Available_Stock'] >= stock_row['ROL']
@@ -226,19 +280,19 @@ def process_query(query, stock_df, base_prices, units, product_descriptions, cli
                     response = f"Yes, {last_product} is available!"
                 elif not is_available and "is available" in response.lower():
                     response = f"Sorry, {last_product} is not available right now."
+
         return response, intent, product
     except Exception as e:
         st.error(f"Groq API error: {str(e)}. Please check your API key or network connection.")
         return "Sorry, I'm having trouble processing your query. Please try again!", "unclear", None
 
 
+# --- PROCUREMENT CHATBOT ---
 def process_procurement_query(query, stock_df, supplier_quotes, procurement_orders, supplier_performance, base_prices,
                               units, client, st):
     """Process procurement query with Groq's Models, highly context-aware for supply chain queries."""
-
     if not query.strip():
         return "Please enter a valid query.", "unclear", None, None, False
-
     # Ensure required libraries are available
     try:
         import json
@@ -248,14 +302,6 @@ def process_procurement_query(query, stock_df, supplier_quotes, procurement_orde
     except ImportError as e:
         st.error(f"Missing dependency: {e}")
         return "Required library is missing. Please install dependencies.", "unclear", None, None, False
-
-    # Initialize session state keys if not present
-    if 'proc_last_intent' not in st.session_state:
-        st.session_state.proc_last_intent = None
-    if 'proc_last_product' not in st.session_state:
-        st.session_state.proc_last_product = None
-    if 'proc_chat_history' not in st.session_state:
-        st.session_state.proc_chat_history = []
 
     # Extract products and suppliers
     products = stock_df['Product'].tolist()
@@ -287,7 +333,7 @@ def process_procurement_query(query, stock_df, supplier_quotes, procurement_orde
     history_text = ""
     for chat in chat_history:
         if chat.get('user') and chat.get('bot') and chat.get('intent') != "farewell":
-            history_text += f"User: {chat['user']}\nAssistant: {chat['bot']}\nIntent: {chat['intent']}\n\n"
+            history_text += f"User: {chat['user']}\nAssistant: {chat['bot']}\nIntent: {chat['intent']}\n"
 
     last_intent = st.session_state.proc_last_intent
     last_product = st.session_state.proc_last_product
@@ -297,10 +343,8 @@ def process_procurement_query(query, stock_df, supplier_quotes, procurement_orde
     Your goal is to assist with all supply chain-related queries about products ({', '.join(products)}),
     including stock levels, reordering, supplier recommendations, supplier performance, and procurement orders.
     Respond in a professional, friendly, and concise tone.
-
     Use conversation history, last intent, and last product to maintain context,
     ensuring coherent and accurate responses for follow-up or ambiguous queries.
-
     Context:
     - Products: {json.dumps(products)}
     - Units: {json.dumps(units)}
@@ -327,11 +371,10 @@ def process_procurement_query(query, stock_df, supplier_quotes, procurement_orde
         } for supplier, products in supplier_performance.items()
     })}
     - Base Prices: {json.dumps(base_prices)}
-
     Conversation History:
     {history_text}
 
-    Intents to detect:
+     Intents to detect:
     - stock_status: Asking about inventory levels for a product (e.g., "What's the stock for Milk?")
     - reorder_suggestion: Asking if a product needs reordering (e.g., "Should I reorder Paneer?")
     - supplier_recommendation: Asking for the best supplier for a product (e.g., "Which supplier for Milk?" or "Should I order from Supplier A?"). If there is any historical delay for that Supplier from Supplier's performance report, then give your recommendation with that caution.
@@ -341,7 +384,7 @@ def process_procurement_query(query, stock_df, supplier_quotes, procurement_orde
     - procurement_status: Asking about pending or recent orders (e.g., "Any orders for Potatoes?")
     - below_rol: Asking for products below ROL (e.g., "What products are below ROL?", "What are the products that need attention ?")
     - at_rol: Asking for products at ROL (e.g., "Which products are at ROL?")
-    - attention_needed: Asking for products needing attention (e.g., "What products need attention today?") - includes products at Reorder level or below Reorder level
+    - attention_needed: Asking for products needing attention (e.g., "What products need attention today?") - includes products at Reorder level (at ROL)or below Reorder level (below ROL) but not which are above Reorder Level
     - explain_rol: Asking what ROL is (e.g., "What is ROL?")
     - lead_time: Asking about lead time for a product (e.g., "What's the lead time for Oil?")
     - stock_out_risk: Asking about risk of stock-out (e.g., "Which products might run out soon?")
@@ -360,7 +403,7 @@ def process_procurement_query(query, stock_df, supplier_quotes, procurement_orde
     - For 'procurement_status', list pending orders for the product with supplier, units, order date, and promised date. If none, say "No pending orders."
     - For 'below_rol', list products with Available_Stock < ROL as bullet points (e.g., "Milk: 25 packets, ROL: 60 packets, Below Reorder Level"). If none, say "No products are below ROL."
     - For 'at_rol', list products with Available_Stock == ROL as bullet points. If none, say "No products are at ROL."
-    - For 'attention_needed', list products with Available_Stock <= ROL as bullet points. If none, say "No products require attention." If previous intent was 'below_rol', assume it refers to at/below ROL.
+    - For 'attention_needed', list products with Available_Stock less than ROL (Available_Stock < ROL) and Available_Stock that is equal to ROL (Available_Stock == ROL) as bullet points. If none, say "No products require attention." If previous intent was 'below_rol', assume it refers to at/below ROL.
     - For 'explain_rol', explain ROL as the stock level triggering a reorder, calculated as (Demand Rate per Day * Lead Time Days) + Minimum Level.
     - For 'lead_time', provide the lead time for the product from stock_info (e.g., "Lead time for Oil is 7 days").
     - For 'stock_out_risk', list products where Available_Stock / Demand_Rate_per_Day < Lead_Time_days, showing days until stock-out. If none, say "No immediate stock-out risks."
@@ -395,12 +438,11 @@ def process_procurement_query(query, stock_df, supplier_quotes, procurement_orde
         # Update session state
         st.session_state.proc_last_intent = intent
         st.session_state.proc_last_product = product
-
         return response, intent, product, supplier, trigger_supplier_quotes
-
     except Exception as e:
         st.error(f"API Error: {str(e)}")
         return "Sorry, I'm having trouble processing your query. Please try again!", "unclear", None, None, False
+
 
 # --- SIDEBAR: CUSTOMER SUPPORT ---
 st.sidebar.header("💬 Customer Support")
@@ -426,6 +468,7 @@ if st.sidebar.button("Chat with Us", key="chat_toggle"):
         st.session_state.last_product = None
         st.session_state.chat_history = []
     st.rerun()
+
 with st.sidebar:
     with st.expander("Customer Chat Window", expanded=st.session_state.show_chat):
         st.markdown("""
@@ -440,6 +483,27 @@ with st.sidebar:
                 }
             </style>
         """, unsafe_allow_html=True)
+
+        if st.button("🎙️ Speak Command", key="voice_customer"):
+            with st.spinner("🎧 Listening..."):
+                audio_file = record_audio(5)
+                voice_text = transcribe_audio(whisper_model, audio_file)
+                if voice_text:
+                    st.session_state.last_user_input = voice_text
+                    response, intent, product = process_query(
+                        voice_text, st.session_state.stock, base_prices, units, product_descriptions, client
+                    )
+                    st.session_state.chat_history.append({
+                        "user": voice_text,
+                        "bot": response,
+                        "intent": intent,
+                        "product": product
+                    })
+                    st.session_state.last_intent = intent
+                    st.session_state.last_product = product
+                    st.session_state.chat_input_counter += 1
+                    st.rerun()
+
         user_input = st.text_input(
             "Ask about our products...",
             key=f"chat_input_{st.session_state.chat_input_counter}",
@@ -462,12 +526,14 @@ with st.sidebar:
                 st.session_state.chat_input_counter += 1
                 st.session_state.last_user_input = None
                 st.rerun()
+
         if st.session_state.chat_history:
             st.write("**Customer Chat History**")
             for chat in st.session_state.chat_history[-5:][::-1]:  # Reverse to show newest first
                 st.markdown(f"**You**: {chat['user']}")
                 st.markdown(f"**Assistant**: {chat['bot']}", unsafe_allow_html=True)
                 st.markdown("---")
+
         if st.button("Close Chat", key=f"close_chat_{st.session_state.update_trigger}"):
             st.session_state.show_chat = False
             st.session_state.chat_history.append({
@@ -480,6 +546,7 @@ with st.sidebar:
             st.session_state.last_product = None
             st.session_state.chat_history = []
             st.rerun()
+
 # --- SIDEBAR: PROCUREMENT ASSISTANT ---
 st.sidebar.header("🤝 Procurement Assistant")
 if st.sidebar.button("Procurement Chat", key="proc_chat_toggle"):
@@ -504,6 +571,7 @@ if st.sidebar.button("Procurement Chat", key="proc_chat_toggle"):
         st.session_state.proc_last_product = None
         st.session_state.proc_chat_history = []
     st.rerun()
+
 with st.sidebar:
     with st.expander("Procurement Chat Window", expanded=st.session_state.show_proc_chat):
         st.markdown("""
@@ -518,6 +586,35 @@ with st.sidebar:
                 }
             </style>
         """, unsafe_allow_html=True)
+
+        if st.button("🎙️ Speak Command", key="voice_procurement"):
+            with st.spinner("🎧 Listening..."):
+                audio_file = record_audio(5)
+                voice_text = transcribe_audio(whisper_model, audio_file)
+                if voice_text:
+                    st.session_state.proc_last_user_input = voice_text
+                    response, intent, product, supplier, trigger_quotes = process_procurement_query(
+                        voice_text,
+                        st.session_state.stock,
+                        st.session_state.supplier_quotes,
+                        st.session_state.procurement_orders,
+                        st.session_state.supplier_performance,
+                        base_prices,
+                        units,
+                        client,
+                        st
+                    )
+                    st.session_state.proc_chat_history.append({
+                        "user": voice_text,
+                        "bot": response,
+                        "intent": intent,
+                        "product": product
+                    })
+                    st.session_state.proc_last_intent = intent
+                    st.session_state.proc_last_product = product
+                    st.session_state.proc_chat_input_counter += 1
+                    st.rerun()
+
         proc_user_input = st.text_input(
             "Ask about procurement...",
             key=f"proc_chat_input_{st.session_state.proc_chat_input_counter}",
@@ -548,12 +645,14 @@ with st.sidebar:
                 st.session_state.proc_chat_input_counter += 1
                 st.session_state.proc_last_user_input = None
                 st.rerun()
+
         if st.session_state.proc_chat_history:
             st.write("**Procurement Chat History**")
             for chat in st.session_state.proc_chat_history[-5:][::-1]:  # Reverse to show newest first
                 st.markdown(f"**You**: {chat['user']}")
                 st.markdown(f"**Assistant**: {chat['bot']}", unsafe_allow_html=True)
                 st.markdown("---")
+
         if st.button("Close Procurement Chat", key=f"close_proc_chat_{st.session_state.update_trigger}"):
             st.session_state.show_proc_chat = False
             st.session_state.proc_chat_history.append({
@@ -566,6 +665,7 @@ with st.sidebar:
             st.session_state.proc_last_product = None
             st.session_state.proc_chat_history = []
             st.rerun()
+
 # --- SIDEBAR: SIMULATION CONTROL ---
 st.sidebar.header("📆 Start your day!")
 if st.sidebar.button("Start Day"):
@@ -576,7 +676,6 @@ if st.sidebar.button("Start Day"):
         base_prices,
         st.session_state.simulation_day
     )
-
 
 if st.sidebar.button("End Day"):
     ended_day = st.session_state.simulation_day
@@ -589,6 +688,7 @@ if st.sidebar.button("End Day"):
     st.success(
         f"✅ Day Ended: {ended_day.strftime('%Y-%m-%d')}. New day: {st.session_state.simulation_day.strftime('%Y-%m-%d')}"
     )
+
 # Only show main functionality if day is started
 if st.session_state.day_started:
     # --- CUSTOMER ORDERING ---
@@ -603,6 +703,7 @@ if st.session_state.day_started:
         else:
             st.session_state.order_items.append({'Product': product, 'Quantity': qty})
             st.success(f"Added {qty} {units[product]} of {product} to order.")
+
     if st.session_state.order_items:
         st.subheader("🧾 Current Order")
         st.dataframe(pd.DataFrame(st.session_state.order_items))
@@ -621,22 +722,31 @@ if st.session_state.day_started:
             st.session_state.order_items = []
             st.session_state.order_count += 1
             st.success("Order placed and stock updated.")
+
     # --- INVENTORY STATUS ---
     st.subheader(f"📦 Updated Inventory Schedule as on {st.session_state.simulation_day.strftime('%Y-%m-%d')}")
+
+
     def get_stock_status(row):
         if row['Available_Stock'] < row['ROL']:
             return 'Below Reorder Level'
         elif row['Available_Stock'] == row['ROL']:
             return 'At Reorder Level'
         return 'Sufficient Stock'
+
+
     def calculate_to_be_ordered(row):
         if row['Available_Stock'] <= row['ROL']:
             return row['Max_Stock'] - row['Available_Stock']
         return 'N/A'
+
+
     def calculate_time_to_stock_out(row):
         if row['Available_Stock'] <= row['ROL']:
             return f"{row['Available_Stock'] / row['Demand_Rate_per_Day']:.1f}"
         return 'N/A'
+
+
     def color_row(row):
         color = ''
         if row['Stock_Status'] == 'Below Reorder Level':
@@ -644,14 +754,18 @@ if st.session_state.day_started:
         elif row['Stock_Status'] == 'At Reorder Level':
             color = 'background-color: orange; animation: blink 1s infinite;'
         return [color] * len(row)
+
+
     st.markdown("""<style>
         @keyframes blink {0% { opacity: 1; } 50% { opacity: 0.5; } 100% { opacity: 1; }}
     </style>""", unsafe_allow_html=True)
+
     st.session_state.stock['Stock_Status'] = st.session_state.stock.apply(get_stock_status, axis=1)
     st.session_state.stock['To_be_Ordered'] = st.session_state.stock.apply(calculate_to_be_ordered, axis=1)
     st.session_state.stock['Time_to_Stock_Out'] = st.session_state.stock.apply(calculate_time_to_stock_out, axis=1)
     styled = st.session_state.stock.style.apply(color_row, axis=1)
     st.markdown(styled.to_html(), unsafe_allow_html=True)
+
     # --- SUPPLIER QUOTES ---
     show_supplier_quotes = False
     for row in st.session_state.stock.itertuples():
@@ -660,6 +774,7 @@ if st.session_state.day_started:
                 not isinstance(row.To_be_Ordered, str)):
             show_supplier_quotes = True
             break
+
     if show_supplier_quotes:
         st.subheader("💬 Supplier Quotes (Top 5 Cheapest per Product)")
         for row in st.session_state.stock.itertuples():
@@ -670,6 +785,7 @@ if st.session_state.day_started:
                 to_order = row.Max_Stock - row.Available_Stock  # Recalculate to ensure latest stock values
                 if isinstance(to_order, str) or to_order <= 0:
                     continue
+
                 # Generate fresh supplier quotes with updated to_order
                 mean_price = base_prices[product]
                 quotes = []
@@ -684,18 +800,22 @@ if st.session_state.day_started:
                         'Total Cost (Rs.)': rate * to_order,
                         'Promised Days': promised_days
                     })
+
                 # Only update quotes if not already exists
                 if product not in st.session_state.supplier_quotes:
                     st.session_state.supplier_quotes[product] = sorted(quotes, key=lambda x: x['Total Cost (Rs.)'])
+
                 df = pd.DataFrame(st.session_state.supplier_quotes[product])
                 selection = st.radio(f"Choose Supplier for {product}", df['Supplier'], key=f"select_{product}")
                 st.dataframe(df)
+
                 if st.button(f"Done for {product}", key=f"done_{product}"):
                     quote = df[df['Supplier'] == selection].iloc[0]
                     rate = float(quote['Rate per Unit (Rs.)'].strip('₹'))
                     promised_days = quote['Promised Days']
                     lead_time_days = int(st.session_state.stock.loc[
                                              st.session_state.stock['Product'] == product, 'Lead_Time_days'].values[0])
+
                     procurement_order = {
                         'Product': product,
                         'Supplier': selection,
@@ -710,13 +830,15 @@ if st.session_state.day_started:
                         'Order_Placed': "Yes",
                         'Received': False
                     }
+
                     st.session_state.procurement_orders.append(procurement_order)
                     st.session_state.order_placed[product] = True
                     st.success(f"{to_order} {units[product]} of {product} ordered from {selection}.")
+
                     # Send order placement confirmation email
                     msg = EmailMessage()
                     msg.set_content(
-                        f"Dear {selection},\n\nThank you for accepting our order of {to_order} {units[product]} of {product}, "
+                        f"Dear {selection},\nThank you for accepting our order of {to_order} {units[product]} of {product}, "
                         f"placed on {st.session_state.simulation_day.strftime('%Y-%m-%d')}. "
                         f"The order is expected to be delivered by {procurement_order['Promised_Date'].strftime('%Y-%m-%d')}.\n\n"
                         f"Order Details:\n"
@@ -725,7 +847,7 @@ if st.session_state.day_started:
                         f"- Units Ordered: {to_order} {units[product]}\n"
                         f"- Order Date: {st.session_state.simulation_day.strftime('%Y-%m-%d')}\n"
                         f"- Promised Delivery Date: {procurement_order['Promised_Date'].strftime('%Y-%m-%d')}\n"
-                        f"- Total Cost: {procurement_order['Total Cost']}\n\n"
+                        f"- Total Cost: {procurement_order['Total Cost']}\n"
                         f"Please confirm receipt of this order and ensure timely delivery.\n\n"
                         f"Regards,\nBuyer"
                     )
@@ -742,6 +864,7 @@ if st.session_state.day_started:
                     except Exception as e:
                         st.error(f"Failed to send order confirmation email for {product} to {selection}: {str(e)}")
                     st.rerun()
+
     # --- PROCUREMENT TRACKING ---
     if st.session_state.procurement_orders:
         st.subheader("🚚 Procurement Order Tracking")
@@ -752,6 +875,7 @@ if st.session_state.day_started:
         df_proc['Status'] = df_proc.apply(
             lambda x: "Overdue" if not x['Received'] and (st.session_state.simulation_day - x['Order_Date']).days > x[
                 'Promised Days'] else "", axis=1)
+
         st.markdown("""
         <style>
             @keyframes blink {0% { opacity: 1; } 50% { opacity: 0.5; } 100% { opacity: 1; }}
@@ -762,6 +886,7 @@ if st.session_state.day_started:
             .warning-box { background-color: #fff3cd; border-left: 5px solid #ffc107; padding: 10px; margin: 10px 0; }
         </style>
         """, unsafe_allow_html=True)
+
         due_today_orders = df_proc[(df_proc['Received'] == False) &
                                    (df_proc.apply(
                                        lambda x: (st.session_state.simulation_day - x['Order_Date']).days == x[
@@ -771,18 +896,20 @@ if st.session_state.day_started:
             <div class="warning-box">
                 <strong>⚠️ DUE TODAY ALERT!</strong> The following orders are to be delivered today:
                 <ul>
-            """ + "\n".join([
+            """ + "".join([
                 f"<li>{row['Product']} from {row['Supplier']} (Ordered: {row['Order_Date'].strftime('%Y-%m-%d')}, Promised: {row['Promised_Date'].strftime('%Y-%m-%d')})</li>"
-                for _, row in due_today_orders.iterrows()]) + """
+                for _, row in due_today_orders.iterrows()
+            ]) + """
                 </ul>
             </div>
             """, unsafe_allow_html=True)
+
             for idx, row in due_today_orders.iterrows():
                 order_key = f"{idx}_{st.session_state.simulation_day.strftime('%Y-%m-%d')}"
                 if order_key not in st.session_state.sent_reminders:
                     msg = EmailMessage()
                     msg.set_content(
-                        f"Dear {row['Supplier']},\n\nThis is a reminder that your order of {row['Units Ordered']} {units[row['Product']]} of {row['Product']}, "
+                        f"Dear {row['Supplier']},\nThis is a reminder that your order of {row['Units Ordered']} {units[row['Product']]} of {row['Product']}, "
                         f"placed on {row['Order_Date'].strftime('%Y-%m-%d')}, is due for delivery today, "
                         f"{row['Promised_Date'].strftime('%Y-%m-%d')}. Please ensure timely delivery.\n\n"
                         f"Order Details:\n"
@@ -807,67 +934,73 @@ if st.session_state.day_started:
                         st.session_state.sent_reminders[order_key] = True
                     except Exception as e:
                         st.error(f"Failed to send reminder email for {row['Product']} from {row['Supplier']}: {str(e)}")
-        overdue_orders = df_proc[(df_proc['Received'] == False) &
-                                 (df_proc['Status'] == "Overdue")]
+
+        overdue_orders = df_proc[(df_proc['Received'] == False) & (df_proc['Status'] == "Overdue")]
         if not overdue_orders.empty:
             st.markdown("""
             <div class="warning-box">
                 <strong>⚠️ OVERDUE ALERT!</strong> The following orders are overdue:
                 <ul>
-            """ + "\n".join([
+            """ + "".join([
                 f"<li>{row['Product']} from {row['Supplier']} (Ordered: {row['Order_Date'].strftime('%Y-%m-%d')}, Promised: {row['Promised_Date'].strftime('%Y-%m-%d')})</li>"
-                for _, row in overdue_orders.iterrows()]) + """
+                for _, row in overdue_orders.iterrows()
+            ]) + """
                 </ul>
             </div>
             """, unsafe_allow_html=True)
+
+
         def style_procurement_row(row):
             styles = [''] * len(row)
             if row['Status'] == "Overdue" and not row['Received']:
                 styles = ['background-color: #ffcccc; color: red; animation: blink 1s infinite;'] * len(row)
             return styles
-        if not df_proc.empty:
-            disabled_columns = ["Product", "Supplier", "Units Ordered", "Rate per Unit", "Total Cost",
-                                "Order_Date", "Promised Days", "Promised_Date", "Lead_Time_days",
-                                "Lead_Time_Date", "Order_Placed", "Days Left", "Status"]
-            edited_df = st.data_editor(
-                df_proc.style.apply(style_procurement_row, axis=1),
-                column_config={
-                    "Product": st.column_config.TextColumn(width="medium"),
-                    "Supplier": st.column_config.TextColumn(width="medium"),
-                    "Units Ordered": st.column_config.NumberColumn(width="small"),
-                    "Rate per Unit": st.column_config.TextColumn(width="small"),
-                    "Total Cost": st.column_config.TextColumn(width="small"),
-                    "Order_Date": st.column_config.DateColumn("Order Date", format="YYYY-MM-DD", width="medium"),
-                    "Promised Days": st.column_config.NumberColumn(width="small"),
-                    "Promised_Date": st.column_config.DateColumn("Promised Date", format="YYYY-MM-DD", width="medium"),
-                    "Lead_Time_days": st.column_config.NumberColumn("Lead Time Days", width="small"),
-                    "Lead_Time_Date": st.column_config.DateColumn("Lead Time Date", format="YYYY-MM-DD",
-                                                                  width="medium"),
-                    "Order_Placed": st.column_config.TextColumn(width="small"),
-                    "Days Left": st.column_config.NumberColumn(width="small"),
-                    "Status": st.column_config.TextColumn("Status", width="small"),
-                    "Received": st.column_config.CheckboxColumn(
-                        "Received",
-                        help="Check to mark as received",
-                        default=False
-                    )
-                },
-                disabled=disabled_columns,
-                hide_index=True,
-                key=f"procurement_editor_{st.session_state.update_trigger}"
-            )
-            for idx, row in edited_df.iterrows():
-                original_order = st.session_state.procurement_orders[idx]
-                if row['Received'] and not original_order['Received'] and idx not in st.session_state.checked_rows:
-                    st.session_state.checked_rows.add(idx)
-                    st.session_state.pending_confirmation = {
-                        'index': idx,
-                        'product': row['Product'],
-                        'supplier': row['Supplier'],
-                        'units_ordered': row['Units Ordered'],
-                        'total_cost': row['Total Cost'],
-                        'order_date': row['Order_Date']
-                    }
+
+
+        disabled_columns = ["Product", "Supplier", "Units Ordered", "Rate per Unit", "Total Cost",
+                            "Order_Date", "Promised Days", "Promised_Date", "Lead_Time_days",
+                            "Lead_Time_Date", "Order_Placed", "Days Left", "Status"]
+
+        edited_df = st.data_editor(
+            df_proc.style.apply(style_procurement_row, axis=1),
+            column_config={
+                "Product": st.column_config.TextColumn(width="medium"),
+                "Supplier": st.column_config.TextColumn(width="medium"),
+                "Units Ordered": st.column_config.NumberColumn(width="small"),
+                "Rate per Unit": st.column_config.TextColumn(width="small"),
+                "Total Cost": st.column_config.TextColumn(width="small"),
+                "Order_Date": st.column_config.DateColumn("Order Date", format="YYYY-MM-DD", width="medium"),
+                "Promised Days": st.column_config.NumberColumn(width="small"),
+                "Promised_Date": st.column_config.DateColumn("Promised Date", format="YYYY-MM-DD", width="medium"),
+                "Lead_Time_days": st.column_config.NumberColumn("Lead Time Days", width="small"),
+                "Lead_Time_Date": st.column_config.DateColumn("Lead Time Date", format="YYYY-MM-DD", width="medium"),
+                "Order_Placed": st.column_config.TextColumn(width="small"),
+                "Days Left": st.column_config.NumberColumn(width="small"),
+                "Status": st.column_config.TextColumn("Status", width="small"),
+                "Received": st.column_config.CheckboxColumn(
+                    "Received",
+                    help="Check to mark as received",
+                    default=False
+                )
+            },
+            disabled=disabled_columns,
+            hide_index=True,
+            key=f"procurement_editor_{st.session_state.update_trigger}"
+        )
+
+        for idx, row in edited_df.iterrows():
+            original_order = st.session_state.procurement_orders[idx]
+            if row['Received'] and not original_order['Received'] and idx not in st.session_state.checked_rows:
+                st.session_state.checked_rows.add(idx)
+                st.session_state.pending_confirmation = {
+                    'index': idx,
+                    'product': row['Product'],
+                    'supplier': row['Supplier'],
+                    'units_ordered': row['Units Ordered'],
+                    'total_cost': row['Total Cost'],
+                    'order_date': row['Order_Date']
+                }
+
         if st.session_state.pending_confirmation:
             pending = st.session_state.pending_confirmation
             st.warning(
@@ -885,7 +1018,8 @@ if st.session_state.day_started:
                     st.session_state.stock.at[idx_stock, 'Available_Stock'] += units_ordered
                     max_stock = st.session_state.stock.at[idx_stock, 'Max_Stock']
                     st.session_state.stock.at[idx_stock, 'Available_Stock'] = min(
-                        st.session_state.stock.at[idx_stock, 'Available_Stock'], max_stock)
+                        st.session_state.stock.at[idx_stock, 'Available_Stock'], max_stock
+                    )
                     lead_time = st.session_state.stock.loc[
                         st.session_state.stock['Product'] == product, 'Lead_Time_days'].values[0]
                     promised_days = st.session_state.procurement_orders[idx]['Promised Days']
@@ -896,14 +1030,15 @@ if st.session_state.day_started:
                     st.session_state.order_placed[product] = False
                     st.session_state.pending_confirmation = None
                     st.session_state.update_trigger += 1
-                    # Clear supplier quotes to regenerate with updated stock
-                    st.session_state.supplier_quotes = {}
+                    st.session_state.supplier_quotes = {}  # Clear quotes to regenerate
                     st.rerun()
+
             with col2:
                 if st.button("Cancel", key=f"cancel_{pending['index']}"):
                     st.session_state.checked_rows.discard(pending['index'])
                     st.session_state.pending_confirmation = None
                     st.rerun()
+
     # --- CUSTOMER ORDER SUMMARY ---
     if st.session_state.placed_orders:
         st.subheader("🧑‍🤝‍🧑 Customers' Order Summary")
@@ -919,6 +1054,7 @@ if st.session_state.day_started:
                         st.session_state.stock['Product'] == item['Product']]['Available_Stock'].values[0]
                 })
         st.dataframe(pd.DataFrame(all_orders))
+
     # --- SUPPLIER PERFORMANCE REPORT ---
     if st.sidebar.button("Show Supplier Performance Report"):
         st.subheader("📊 Supplier Performance Report (Last 10 Days)")
@@ -941,9 +1077,11 @@ if st.session_state.day_started:
                     'count': 0,
                     'base_price': base_price
                 }
-            st.session_state.supplier_performance[supplier][product]['total_delay'] += delay_days
-            st.session_state.supplier_performance[supplier][product]['total_price'] += price
-            st.session_state.supplier_performance[supplier][product]['count'] += 1
+            sp = st.session_state.supplier_performance[supplier][product]
+            sp['total_delay'] += delay_days
+            sp['total_price'] += price
+            sp['count'] += 1
+
         supplier_performance = {
             'Supplier': [],
             'Product': [],
@@ -952,6 +1090,7 @@ if st.session_state.day_started:
             'Average Price (Rs.)': [],
             'Base Price (Rs.)': []
         }
+
         for supplier, products in st.session_state.supplier_performance.items():
             for product, metrics in products.items():
                 supplier_performance['Supplier'].append(supplier)
@@ -962,6 +1101,7 @@ if st.session_state.day_started:
                 supplier_performance['Average Price (Rs.)'].append(
                     round(metrics['total_price'] / metrics['count'], 2) if metrics['count'] > 0 else 0)
                 supplier_performance['Base Price (Rs.)'].append(metrics['base_price'])
+
         performance_df = pd.DataFrame(supplier_performance)
         if not performance_df.empty:
             st.dataframe(performance_df)
