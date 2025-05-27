@@ -7,6 +7,9 @@ from email.message import EmailMessage
 from groq import Groq
 import os
 import json
+import trafilatura
+import requests
+import time
 
 # Get API key from Streamlit secrets or environment variable
 groq_api_key = st.secrets.get("GROQ_API_KEY")
@@ -58,6 +61,10 @@ def calculate_supplier_performance(procurement_orders, base_prices, simulation_d
         sp['count'] += 1
 
     return supplier_performance
+
+
+
+
 
 # Initialize Groq client
 try:
@@ -653,6 +660,17 @@ if st.session_state.day_started:
     styled = st.session_state.stock.style.apply(color_row, axis=1)
     st.markdown(styled.to_html(), unsafe_allow_html=True)
     # --- SUPPLIER QUOTES ---
+
+    # Supplier City Mapping
+    supplier_city = {
+        'Supplier A': 'Pune',
+        'Supplier B': 'Chennai',
+        'Supplier C': 'Hyderabad',
+        'Supplier D': 'Surat',
+        'Supplier E': 'Nagpur'
+    }
+
+
     show_supplier_quotes = False
     for row in st.session_state.stock.itertuples():
         if (row.Stock_Status in ['Below Reorder Level', 'At Reorder Level'] and
@@ -689,6 +707,139 @@ if st.session_state.day_started:
                     st.session_state.supplier_quotes[product] = sorted(quotes, key=lambda x: x['Total Cost (Rs.)'])
                 df = pd.DataFrame(st.session_state.supplier_quotes[product])
                 selection = st.radio(f"Choose Supplier for {product}", df['Supplier'], key=f"select_{product}")
+                # Supplier-City Mapping
+                supplier_city = {
+                    'Supplier A': 'Pune',
+                    'Supplier B': 'Chennai',
+                    'Supplier C': 'Hyderabad',
+                    'Supplier D': 'Surat',
+                    'Supplier E': 'Nagpur'
+                }
+
+
+                def fetch_weather_news(city, api_key='5b4c4d76315e4132b5d5efa76f306db1'):
+                    """
+                    Fetches recent weather-related news articles for a given city.
+
+                    Args:
+                        city (str): The city name to search for weather news
+                        api_key (str): Your NewsAPI API key
+
+                    Returns:
+                        list: List of dictionaries containing headline, source, summary, and URL
+                              Returns empty list on error
+                    """
+                    try:
+                        # Date range - exactly like your working code
+                        two_days_ago = (datetime.now() - timedelta(days=2)).strftime('%Y-%m-%d')
+                        today = datetime.now().strftime('%Y-%m-%d')
+
+                        # NewsAPI parameters - matching your working structure
+                        url = 'https://newsapi.org/v2/everything'
+                        params = {
+                            'q': f'{city} weather',
+                            'from': two_days_ago,
+                            'to': today,
+                            'sortBy': 'popularity',
+                            'language': 'en',
+                            'pageSize': 10,
+                            'apiKey': api_key
+                        }
+
+                        # Fetch data - exactly like your working code
+                        response = requests.get(url, params=params)
+
+                        # Debug information
+                        print(f"Response status code: {response.status_code}")
+                        print(f"Response headers: {response.headers.get('content-type', 'Unknown')}")
+
+                        # Try to parse JSON first, then check status
+                        try:
+                            data = response.json()
+                        except requests.exceptions.JSONDecodeError as e:
+                            print(f"JSON decode error: {e}")
+                            print(f"Response content: {response.text[:500]}")
+                            return []
+                        except ValueError as e:
+                            print(f"Value error parsing JSON: {e}")
+                            print(f"Response content: {response.text[:500]}")
+                            return []
+
+                        # Check response status - matching your working code logic
+                        if response.status_code != 200 or data.get('status') != 'ok':
+                            print("Error fetching data:", data)
+                            return []
+
+                        articles = data.get('articles', [])
+                        if not articles:
+                            print("No articles found.")
+                            return []
+
+                        print(f"Found {len(articles)} articles on {params['q']}")
+                        results = []
+
+                        for i, article in enumerate(articles, 1):
+                            # Get article details
+                            title = article.get('title')
+                            source = article.get('source', {}).get('name')
+                            published = article.get('popularity')
+                            article_url = article.get('url')
+
+                            # Skip if missing essential fields
+                            if not title or not article_url:
+                                continue
+
+                            # Try to download and extract full text - exactly like your working code
+                            try:
+                                downloaded = trafilatura.fetch_url(article_url)
+                                full_text = trafilatura.extract(
+                                    downloaded) if downloaded else '[Could not download content]'
+                            except Exception as e:
+                                full_text = f'[Error: {e}]'
+
+                            # Create summary from full text
+                            summary = full_text[:400] + "..." if full_text and len(full_text) > 400 else (
+                                    full_text or "No content available.")
+
+                            results.append({
+                                'Headline': title,
+                                'Content Summary': summary,
+                                'Source': source or 'Unknown',
+                                'URL': article_url,
+                                'Published': published
+                            })
+
+                            time.sleep(1)  # Respect rate limits
+
+                        return results
+
+                    except requests.exceptions.RequestException as e:
+                        print(f"Network error fetching weather news: {str(e)}")
+                        return []
+                    except Exception as e:
+                        print(f"Unexpected error processing weather news: {str(e)}")
+                        import traceback
+                        traceback.print_exc()
+                        return []
+
+                # Show dynamic button
+                selected_supplier = st.session_state[f"select_{product}"]
+                city = supplier_city.get(selected_supplier, 'Unknown')
+                weather_button_label = f"🌤️ Know the news around {selected_supplier}"
+
+                if st.button(weather_button_label, key=f"weather_{product}"):
+                    with st.spinner("Fetching latest weather news..."):
+                        weather_news = fetch_weather_news(city)
+                        if weather_news:
+                            # Convert list of dicts to DataFrame
+                            news_df = pd.DataFrame(weather_news)[['Headline', 'Content Summary', 'Source']]
+
+                            # Show table
+                            st.markdown(f"### 🌤️ Weather News for **{city}**")
+                            st.dataframe(news_df, use_container_width=True, hide_index=True)
+                        else:
+                            st.info("No weather news found.")
+
                 st.dataframe(df)
                 if st.button(f"Done for {product}", key=f"done_{product}"):
                     quote = df[df['Supplier'] == selection].iloc[0]
@@ -742,6 +893,8 @@ if st.session_state.day_started:
                     except Exception as e:
                         st.error(f"Failed to send order confirmation email for {product} to {selection}: {str(e)}")
                     st.rerun()
+
+
     # --- PROCUREMENT TRACKING ---
     if st.session_state.procurement_orders:
         st.subheader("🚚 Procurement Order Tracking")
