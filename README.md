@@ -8,3 +8,6 @@ email
 faster_whisper
 sounddevice
 wavio
+trafilatura
+requests
+time
