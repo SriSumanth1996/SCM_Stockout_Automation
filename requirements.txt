@@ -13,3 +13,4 @@ trafilatura
 transformers
 torch
 requests
+sentencepiece
