@@ -10,6 +10,25 @@ import json
 import trafilatura
 import requests
 import time
+from transformers import pipeline, AutoModelForSequenceClassification, AutoTokenizer
+from fuzzywuzzy import process
+
+# Initialize ABSA model
+try:
+    model_name = "yangheng/deberta-v3-base-absa-v1.1"
+
+    tokenizer = AutoTokenizer.from_pretrained(model_name)
+    model = AutoModelForSequenceClassification.from_pretrained(model_name, device_map="auto")
+
+    absa_model = pipeline(
+        "text-classification",
+        model=model,
+        tokenizer=tokenizer
+    )
+
+except Exception as e:
+    st.error(f"Failed to load ABSA model: {str(e)}")
+    absa_model = None
 
 # Get API key from Streamlit secrets or environment variable
 groq_api_key = st.secrets.get("GROQ_API_KEY")
@@ -25,11 +44,10 @@ if not groq_api_key:
          ```toml
          GROQ_API_KEY = "gsk_...YceG"
          ```
-       - If deployed on Streamlit Cloud, add `GROQ_API_KEY` in the app's secrets settings.
-    3. Replace `gsk_...YceG` with your full API key from Groq.
+    If deployed on Streamlit Cloud, add GROQ_API_KEY in the app's secrets settings.
+    Replace gsk_...YceG with your full API key from Groq.
     """)
     st.stop()
-
 
 def calculate_supplier_performance(procurement_orders, base_prices, simulation_day):
     supplier_performance = {}
@@ -62,10 +80,6 @@ def calculate_supplier_performance(procurement_orders, base_prices, simulation_d
 
     return supplier_performance
 
-
-
-
-
 # Initialize Groq client
 try:
     client = Groq(api_key=groq_api_key)
@@ -87,6 +101,7 @@ products_data = {
     'Lead_Time_days': [3, 2, 4, 5, 3, 7],
     'Max_Stock': [100, 200, 150, 180, 120, 250]
 }
+
 demand_rate = {'Paneer': 10, 'Milk': 15, 'Onions': 8, 'Potatoes': 12, 'Meat': 5, 'Oil': 20}
 units = {'Paneer': 'kgs', 'Milk': 'packets', 'Onions': 'kgs', 'Potatoes': 'kgs', 'Meat': 'kgs', 'Oil': 'kgs'}
 
@@ -107,7 +122,7 @@ inventory_df['ROL'] = inventory_df.apply(
     lambda row: (row['Demand_Rate_per_Day'] * row['Lead_Time_days']) + row['Minimum_Level'], axis=1)
 inventory_df['Units'] = inventory_df['Product'].map(units)
 
-# --- Session State Initialization ---
+# Session State Initialization
 for key, value in {
     'stock': inventory_df.copy(),
     'order_items': [],
@@ -134,7 +149,8 @@ for key, value in {
     'proc_last_user_input': None,
     'show_proc_chat': False,
     'proc_last_intent': None,
-    'proc_last_product': None
+    'proc_last_product': None,
+    'customer_reviews': {}
 }.items():
     if key not in st.session_state:
         st.session_state[key] = value
@@ -142,11 +158,11 @@ for key, value in {
 # Title
 st.title(f"🛒 Product Ordering App - {st.session_state.simulation_day.strftime('%Y-%m-%d')}")
 
-# --- CUSTOMER CHATBOT ---
+# Customer Chatbot
 def process_query(query, stock_df, base_prices, units, product_descriptions, client):
-    """Process user query with Groq's Models, supporting multi-turn conversation."""
     if not query.strip():
         return None, None, None
+
     products = stock_df['Product'].tolist()
     stock_info = stock_df.set_index('Product')[['Available_Stock', 'ROL']].to_dict('index')
     context = {
@@ -156,51 +172,54 @@ def process_query(query, stock_df, base_prices, units, product_descriptions, cli
         'units': units,
         'stock_info': stock_info
     }
+
     # Build chat history for context (last 5 exchanges)
     chat_history = st.session_state.chat_history[-5:]
     history_text = ""
     for chat in chat_history:
         if chat['user'] and chat['bot'] and chat['intent'] != "farewell":
             history_text += f"User: {chat['user']}\nAssistant: {chat['bot']}\n"
+
     # Use last_intent and last_product for context if available
     last_intent = st.session_state.last_intent
     last_product = st.session_state.last_product
+
     prompt = f"""
     You are a friendly customer support chatbot for Bitsom Gourmet, a grocery store. Your goal is to assist users with queries about products ({', '.join(products)}), provide information, and guide them to place orders if needed. Respond in a casual, engaging, and respectable tone. Use the conversation history and last intent/product to interpret follow-up queries, ensuring coherent and context-aware responses.
     Context:
-    - Products: {json.dumps(products)}
-    - Descriptions: {json.dumps(product_descriptions)}
-    - Prices: {json.dumps(base_prices)}
-    - Units: {json.dumps(units)}
-    - Stock Info: {json.dumps(stock_info)}
-    - Last Intent: {json.dumps(last_intent)}
-    - Last Product: {json.dumps(last_product)}
-    Conversation History:
-    {history_text}
+    Products: {json.dumps(products)}
+    Descriptions: {json.dumps(product_descriptions)}
+    Prices: {json.dumps(base_prices)}
+    Units: {json.dumps(units)}
+    Stock Info: {json.dumps(stock_info)}
+    Last Intent: {json.dumps(last_intent)}
+    Last Product: {json.dumps(last_product)}
+    Conversation History: {history_text}
     Intents to detect:
-    - description: Asking about a product (e.g., "Tell me about Paneer")
-    - availability: Checking stock (e.g., "Do you have Milk?")
-    - price: Asking cost (e.g., "How much is Onions?")
-    - greeting: Casual greetings (e.g., "Hello", "Hi")
-    - all_products: Listing products (e.g., "What items do you have?")
-    - delivery: Delivery info (e.g., "When can you deliver?")
-    - unclear: Ambiguous or unrelated (e.g., "What's up?")
+    description: Asking about a product (e.g., "Tell me about Paneer")
+    availability: Checking stock (e.g., "Do you have Milk?")
+    price: Asking cost (e.g., "How much is Onions?")
+    greeting: Casual greetings (e.g., "Hello", "Hi")
+    all_products: Listing products (e.g., "What items do you have?")
+    delivery: Delivery info (e.g., "When can you deliver?")
+    unclear: Ambiguous or unrelated (e.g., "What's up?")
     Instructions:
-    - Identify the product (case-insensitive) and intent from the query.
-    - Do not provide stock quantities unless explicitly asked.
-    - For 'description', return the provided description.
-    - For 'availability', check the stock_info dictionary for the product's Available_Stock and ROL. If Available_Stock >= ROL, the product is available (e.g., "Yes, [product] is available!"). If Available_Stock < ROL, the product is not available (e.g., "Sorry, [product] is not available right now."). If no product is identified, ask for clarification (e.g., "Which product are you asking about?").
-    - For 'price', provide the price per unit.
-    - For 'all_products', list all products.
-    - For 'delivery', mention 2-3 day delivery.
-    - For 'greeting', welcome and suggest asking about products or ordering.
-    - For 'unclear', guide to ask about products or ordering.
-    - Use the conversation history to understand context (e.g., "Is it available?" refers to the last mentioned product).
-    - If the query is ambiguous (e.g., "Is it available?"), infer the product from Last Product or history; if unclear, ask for clarification (e.g., "Which product do you mean?").
-    - Reference prior exchanges naturally when relevant (e.g., "As I mentioned about Paneer...").
-    - Return a JSON object with: intent (string), product (string or null), response (string).
+    Identify the product (case-insensitive) and intent from the query.
+    Do not provide stock quantities unless explicitly asked.
+    For 'description', return the provided description.
+    For 'availability', check the stock_info dictionary for the product's Available_Stock and ROL. If Available_Stock >= ROL, the product is available (e.g., "Yes, [product] is available!"). If Available_Stock < ROL, the product is not available (e.g., "Sorry, [product] is not available right now."). If no product is identified, ask for clarification (e.g., "Which product are you asking about?").
+    For 'price', provide the price per unit.
+    For 'all_products', list all products.
+    For 'delivery', mention 2-3 day delivery.
+    For 'greeting', welcome and suggest asking about products or ordering.
+    For 'unclear', guide to ask about products or ordering.
+    Use the conversation history to understand context (e.g., "Is it available?" refers to the last mentioned product).
+    If the query is ambiguous (e.g., "Is it available?"), infer the product from Last Product or history; if unclear, ask for clarification (e.g., "Which product do you mean?").
+    Reference prior exchanges naturally when relevant (e.g., "As I mentioned about Paneer...").
+    Return a JSON object with: intent (string), product (string or null), response (string).
     Current Query: "{query}"
     """
+
     try:
         completion = client.chat.completions.create(
             model="llama-3.3-70b-versatile",
@@ -213,6 +232,7 @@ def process_query(query, stock_df, base_prices, units, product_descriptions, cli
         response = result.get('response', "Sorry, I couldn't process that. Please try again!")
         intent = result.get('intent', 'unclear')
         product = result.get('product', None)
+
         # Validate availability response in Python to ensure correctness
         if intent == 'availability' and product and product in stock_df['Product'].values:
             stock_row = stock_df[stock_df['Product'] == product].iloc[0]
@@ -221,52 +241,33 @@ def process_query(query, stock_df, base_prices, units, product_descriptions, cli
                 response = f"Yes, {product} is available!"
             elif not is_available and "is available" in response.lower():
                 response = f"Sorry, {product} is not available right now."
+
         # Fallback to last_product for relevant intents if product is None
         if not product and intent in ['price', 'availability', 'description'] and last_product:
             product = last_product
             response = f"Assuming you mean {last_product}: {response}"
-            # Re-validate for availability with last_product
-            if intent == 'availability' and last_product in stock_df['Product'].values:
-                stock_row = stock_df[stock_df['Product'] == last_product].iloc[0]
-                is_available = stock_row['Available_Stock'] >= stock_row['ROL']
-                if is_available and "not available" in response.lower():
-                    response = f"Yes, {last_product} is available!"
-                elif not is_available and "is available" in response.lower():
-                    response = f"Sorry, {last_product} is not available right now."
+
+        # Re-validate for availability with last_product
+        if intent == 'availability' and last_product in stock_df['Product'].values:
+            stock_row = stock_df[stock_df['Product'] == last_product].iloc[0]
+            is_available = stock_row['Available_Stock'] >= stock_row['ROL']
+            if is_available and "not available" in response.lower():
+                response = f"Yes, {last_product} is available!"
+            elif not is_available and "is available" in response.lower():
+                response = f"Sorry, {last_product} is not available right now."
+
         return response, intent, product
+
     except Exception as e:
         st.error(f"Groq API error: {str(e)}. Please check your API key or network connection.")
         return "Sorry, I'm having trouble processing your query. Please try again!", "unclear", None
 
-
-def process_procurement_query(query, stock_df, supplier_quotes, procurement_orders, supplier_performance, base_prices,
-                              units, client, st):
-    """Process procurement query with Groq's Models, highly context-aware for supply chain queries."""
-
+def process_procurement_query(query, stock_df, supplier_quotes, procurement_orders, supplier_performance, base_prices, units, client, st):
     if not query.strip():
         return "Please enter a valid query.", "unclear", None, None, False
 
-    # Ensure required libraries are available
-    try:
-        import json
-        import numpy as np
-        import pandas as pd
-        from fuzzywuzzy import process
-    except ImportError as e:
-        st.error(f"Missing dependency: {e}")
-        return "Required library is missing. Please install dependencies.", "unclear", None, None, False
-
-    # Initialize session state keys if not present
-    if 'proc_last_intent' not in st.session_state:
-        st.session_state.proc_last_intent = None
-    if 'proc_last_product' not in st.session_state:
-        st.session_state.proc_last_product = None
-    if 'proc_chat_history' not in st.session_state:
-        st.session_state.proc_chat_history = []
-
-    # Extract products and suppliers
     products = stock_df['Product'].tolist()
-    suppliers = [f"Supplier {chr(65 + i)}" for i in range(5)]  # Supplier A-E
+    suppliers = [f"Supplier {chr(65 + i)}" for i in range(5)]
 
     def extract_product(text):
         if not text.strip():
@@ -289,7 +290,6 @@ def process_procurement_query(query, stock_df, supplier_quotes, procurement_orde
     product = extract_product(query) or st.session_state.proc_last_product
     supplier = extract_supplier(query)
 
-    # Build chat history for context
     chat_history = st.session_state.proc_chat_history[-5:]
     history_text = ""
     for chat in chat_history:
@@ -309,78 +309,74 @@ def process_procurement_query(query, stock_df, supplier_quotes, procurement_orde
     ensuring coherent and accurate responses for follow-up or ambiguous queries.
 
     Context:
-    - Products: {json.dumps(products)}
-    - Units: {json.dumps(units)}
-    - Stock Info: {stock_df.set_index('Product')[['Available_Stock', 'ROL', 'Max_Stock']].to_dict('index')}
-    - Supplier Quotes: {json.dumps(supplier_quotes)}
-    - Procurement Orders: {json.dumps([
-        {
-            'Product': order['Product'],
-            'Supplier': order['Supplier'],
-            'Units Ordered': order['Units Ordered'],
-            'Order_Date': order['Order_Date'].strftime('%Y-%m-%d'),
-            'Promised_Date': order['Promised_Date'].strftime('%Y-%m-%d'),
-            'Received': order['Received']
-        } for order in procurement_orders
-    ])}
-    - Supplier Performance: {json.dumps({
-        supplier: {
-            product: {
-                'avg_delay': round(metrics['total_delay'] / metrics['count'], 2) if metrics['count'] > 0 else 0,
-                'avg_price': round(metrics['total_price'] / metrics['count'], 2) if metrics['count'] > 0 else 0,
-                'base_price': metrics['base_price'],
-                'order_count': metrics['count']
-            } for product, metrics in products.items()
-        } for supplier, products in supplier_performance.items()
-    })}
-    - Base Prices: {json.dumps(base_prices)}
 
+    Products: {json.dumps(products)}
+    Units: {json.dumps(units)}
+    Stock Info: {stock_df.set_index('Product')[['Available_Stock', 'ROL', 'Max_Stock']].to_dict('index')}
+    Supplier Quotes: {json.dumps(supplier_quotes)}
+    Procurement Orders: {json.dumps([{
+        'Product': order['Product'],
+        'Supplier': order['Supplier'],
+        'Units Ordered': order['Units Ordered'],
+        'Order_Date': order['Order_Date'].strftime('%Y-%m-%d'),
+        'Promised_Date': order['Promised_Date'].strftime('%Y-%m-%d'),
+        'Received': order['Received']
+    } for order in procurement_orders])}
+    Supplier Performance: {json.dumps({supplier: {product: {
+        'avg_delay': round(metrics['total_delay'] / metrics['count'], 2) if metrics['count'] > 0 else 0,
+        'avg_price': round(metrics['total_price'] / metrics['count'], 2) if metrics['count'] > 0 else 0,
+        'base_price': metrics['base_price'],
+        'order_count': metrics['count']
+    } for product, metrics in products.items()} for supplier, products in supplier_performance.items()})}
+    Base Prices: {json.dumps(base_prices)}
     Conversation History:
     {history_text}
 
     Intents to detect:
-    - stock_status: Asking about inventory levels for a product (e.g., "What's the stock for Milk?")
-    - reorder_suggestion: Asking if a product needs reordering (e.g., "Should I reorder Paneer?")
-    - supplier_recommendation: Asking for the best supplier for a product (e.g., "Which supplier for Milk?" or "Should I order from Supplier A?"). If there is any historical delay for that Supplier from Supplier's performance report, then give your recommendation with that caution.
-    - supplier_performance: Asking about a supplier's performance for a specific product (e.g., "How reliable is Supplier A for Milk?")
-    - general_supplier_performance: Asking about a supplier's overall performance (e.g., "How is Supplier A performing?")
-    - suppliers: Asking for a list of suppliers for a product (e.g., "Who are the suppliers for Milk?")
-    - procurement_status: Asking about pending or recent orders (e.g., "Any orders for Potatoes?")
-    - below_rol: Asking for products below ROL (e.g., "What products are below ROL?", "What are the products that need attention ?")
-    - at_rol: Asking for products at ROL (e.g., "Which products are at ROL?")
-    - attention_needed: Asking for products needing attention (e.g., "What products need attention today?") - includes products at Reorder level or below Reorder level
-    - explain_rol: Asking what ROL is (e.g., "What is ROL?")
-    - lead_time: Asking about lead time for a product (e.g., "What's the lead time for Oil?")
-    - stock_out_risk: Asking about risk of stock-out (e.g., "Which products might run out soon?")
-    - order_cost: Asking about cost of ordering a product (e.g., "How much to order 100 packets of Milk?")
-    - supplier_contact: Asking for supplier contact details (e.g., "How do I contact Supplier A?")
-    - greeting: Casual greetings (e.g., "Hello")
-    - unclear: Ambiguous or unrelated queries
+
+    stock_status: Asking about inventory levels for a product (e.g., "What's the stock for Milk?")
+    reorder_suggestion: Asking if a product needs reordering (e.g., "Should I reorder Paneer?")
+    supplier_recommendation: Asking for the best supplier for a product (e.g., "Which supplier for Milk?" or "Should I order from Supplier A?"). If there is any historical delay for that Supplier from Supplier's performance report, then give your recommendation with that caution.
+    supplier_performance: Asking about a supplier's performance for a specific product (e.g., "How reliable is Supplier A for Milk?")
+    general_supplier_performance: Asking about a supplier's overall performance (e.g., "How is Supplier A performing?")
+    suppliers: Asking for a list of suppliers for a product (e.g., "Who are the suppliers for Milk?")
+    procurement_status: Asking about pending or recent orders (e.g., "Any orders for Potatoes?")
+    below_rol: Asking for products below ROL (e.g., "What products are below ROL?", "What are the products that need attention ?")
+    at_rol: Asking for products at ROL (e.g., "Which products are at ROL?")
+    attention_needed: Asking for products needing attention (e.g., "What products need attention today?") - includes products at Reorder level or below Reorder level
+    explain_rol: Asking what ROL is (e.g., "What is ROL?")
+    lead_time: Asking about lead time for a product (e.g., "What's the lead time for Oil?")
+    stock_out_risk: Asking about risk of stock-out (e.g., "Which products might run out soon?")
+    order_cost: Asking about cost of ordering a product (e.g., "How much to order 100 packets of Milk?")
+    supplier_contact: Asking for supplier contact details (e.g., "How do I contact Supplier A?")
+    greeting: Casual greetings (e.g., "Hello")
+    unclear: Ambiguous or unrelated queries
 
     Instructions:
-    - Identify the product (case-insensitive), supplier (e.g., 'Supplier A', 'A'), and intent from the query.
-    - Use correct units (from Units) for quantities (e.g., 'packets' for Milk, 'kgs' for Oil).
-    - For 'stock_status', provide current stock, ROL, and status (e.g., "Milk: 25 packets, ROL: 60 packets, Below Reorder Level").
-    - For 'reorder_suggestion', if stock is at/below ROL, suggest ordering (Max_Stock - Available_Stock) units, recommending the cheapest supplier if available. If sufficient, say no reorder needed.
-    - For 'supplier_recommendation', if a supplier is specified, evaluate their rate and check supplier_performance for delays; if avg_delay > 2 days, caution and suggest the next cheapest supplier. If no supplier specified, recommend the cheapest supplier, noting any delays from performance data.
-    - For 'suppliers', use existing supplier quotes from Supplier Quotes if available for the product. If no quotes exist or stock is sufficient, generate fresh quotes only if needed (mean price from base_prices, normal distribution with 10% std dev, lead time from stock_df with 10% std dev, min 1 day). List suppliers with rates, total costs, and promised days as bullet points. Trigger the Supplier Quotes section to display the table for the product.
-    - For 'procurement_status', list pending orders for the product with supplier, units, order date, and promised date. If none, say "No pending orders."
-    - For 'below_rol', list products with Available_Stock < ROL as bullet points (e.g., "Milk: 25 packets, ROL: 60 packets, Below Reorder Level"). If none, say "No products are below ROL."
-    - For 'at_rol', list products with Available_Stock == ROL as bullet points. If none, say "No products are at ROL."
-    - For 'attention_needed', list products with Available_Stock <= ROL as bullet points. If none, say "No products require attention." If previous intent was 'below_rol', assume it refers to at/below ROL.
-    - For 'explain_rol', explain ROL as the stock level triggering a reorder, calculated as (Demand Rate per Day * Lead Time Days) + Minimum Level.
-    - For 'lead_time', provide the lead time for the product from stock_info (e.g., "Lead time for Oil is 7 days").
-    - For 'stock_out_risk', list products where Available_Stock / Demand_Rate_per_Day < Lead_Time_days, showing days until stock-out. If none, say "No immediate stock-out risks."
-    - For 'order_cost', calculate cost for the specified quantity using the cheapest supplier’s rate. If no quantity specified, use (Max_Stock - Available_Stock).
-    - For 'supplier_performance', provide average delay, order count, and price deviation from base price for the supplier/product.
-    - For 'general_supplier_performance', summarize supplier’s performance across all products (products supplied, average delay, average price deviation %).
-    - For 'supplier_contact', provide a placeholder email (e.g., "Contact Supplier A at supplierA@bitsomgourmet.com").
-    - For 'greeting', welcome and suggest asking about procurement tasks.
-    - For 'unclear', infer intent/product from history (e.g., "What about them?" after 'below_rol' refers to those products). Otherwise, ask for clarification.
-    - Reference prior exchanges naturally (e.g., "As we discussed about Milk...").
-    - If ambiguous, infer product from Last Product or history; for supplier queries, infer supplier (e.g., 'A' as 'Supplier A'); else, ask for clarification.
-    - Format lists (e.g., below_rol, suppliers) as bullet points for clarity.
-    - Return JSON: {{intent: string, product: string or null, supplier: string or null, response: string, trigger_supplier_quotes: boolean}}.
+
+    Identify the product (case-insensitive), supplier (e.g., 'Supplier A', 'A'), and intent from the query.
+    Use correct units (from Units) for quantities (e.g., 'packets' for Milk, 'kgs' for Oil).
+    For 'stock_status', provide current stock, ROL, and status (e.g., "Milk: 25 packets, ROL: 60 packets, Below Reorder Level").
+    For 'reorder_suggestion', if stock is at/below ROL, suggest ordering (Max_Stock - Available_Stock) units, recommending the cheapest supplier if available. If sufficient, say no reorder needed.
+    For 'supplier_recommendation', if a supplier is specified, evaluate their rate and check supplier_performance for delays; if avg_delay > 2 days, caution and suggest the next cheapest supplier. If no supplier specified, recommend the cheapest supplier, noting any delays from performance data.
+    For 'suppliers', use existing supplier quotes from Supplier Quotes if available for the product. If no quotes exist or stock is sufficient, generate fresh quotes only if needed (mean price from base_prices, normal distribution with 10% std dev, lead time from stock_df with 10% std dev, min 1 day). List suppliers with rates, total costs, and promised days as bullet points. Trigger the Supplier Quotes section to display the table for the product.
+    For 'procurement_status', list pending orders for the product with supplier, units, order date, and promised date. If none, say "No pending orders."
+    For 'below_rol', list products with Available_Stock < ROL as bullet points (e.g., "Milk: 25 packets, ROL: 60 packets, Below Reorder Level"). If none, say "No products are below ROL."
+    For 'at_rol', list products with Available_Stock == ROL as bullet points. If none, say "No products are at ROL."
+    For 'attention_needed', list products with Available_Stock <= ROL as bullet points. If none, say "No products require attention." If previous intent was 'below_rol', assume it refers to at/below ROL.
+    For 'explain_rol', explain ROL as the stock level triggering a reorder, calculated as (Demand Rate per Day * Lead Time Days) + Minimum Level.
+    For 'lead_time', provide the lead time for the product from stock_info (e.g., "Lead time for Oil is 7 days").
+    For 'stock_out_risk', list products where Available_Stock / Demand_Rate_per_Day < Lead_Time_days, showing days until stock-out. If none, say "No immediate stock-out risks."
+    For 'order_cost', calculate cost for the specified quantity using the cheapest supplier’s rate. If no quantity specified, use (Max_Stock - Available_Stock).
+    For 'supplier_performance', provide average delay, order count, and price deviation from base price for the supplier/product.
+    For 'general_supplier_performance', summarize supplier’s performance across all products (products supplied, average delay, average price deviation %).
+    For 'supplier_contact', provide a placeholder email (e.g., "Contact Supplier A at supplierA@bitsomgourmet.com").
+    For 'greeting', welcome and suggest asking about procurement tasks.
+    For 'unclear', infer intent/product from history (e.g., "What about them?" after 'below_rol' refers to those products). Otherwise, ask for clarification.
+    Reference prior exchanges naturally (e.g., "As we discussed about Milk...").
+    If ambiguous, infer product from Last Product or history; for supplier queries, infer supplier (e.g., 'A' as 'Supplier A'); else, ask for clarification.
+    Format lists (e.g., below_rol, suppliers) as bullet points for clarity.
+    Return JSON: {{intent: string, product: string or null, supplier: string or null, response: string, trigger_supplier_quotes: boolean}}.
     Current Query: "{query}"
     """
 
@@ -399,7 +395,6 @@ def process_procurement_query(query, stock_df, supplier_quotes, procurement_orde
         supplier = result.get("supplier", supplier)
         trigger_supplier_quotes = result.get("trigger_supplier_quotes", False)
 
-        # Update session state
         st.session_state.proc_last_intent = intent
         st.session_state.proc_last_product = product
 
@@ -409,7 +404,63 @@ def process_procurement_query(query, stock_df, supplier_quotes, procurement_orde
         st.error(f"API Error: {str(e)}")
         return "Sorry, I'm having trouble processing your query. Please try again!", "unclear", None, None, False
 
-# --- SIDEBAR: CUSTOMER SUPPORT ---
+# Function to map sentiment score to emoticon and label
+def get_sentiment_emoticon(score):
+    if 0.00 <= score <= 0.15:
+        return "😡", "Furious"
+    elif 0.16 <= score <= 0.35:
+        return "😞", "Disappointed"
+    elif 0.36 <= score <= 0.55:
+        return "😐", "Neutral"
+    elif 0.56 <= score <= 0.75:
+        return "🙂", "Satisfied"
+    elif 0.76 <= score <= 0.90:
+        return "😃", "Happy"
+    elif 0.91 <= score <= 1.00:
+        return "🤩", "Delighted"
+    return "❓", "Unknown"
+
+# Function to map sentiment score to star rating (1–5)
+def get_star_rating(score):
+    if 0.00 <= score <= 0.20:
+        return "★☆☆☆☆"
+    elif 0.21 <= score <= 0.40:
+        return "★★☆☆☆"
+    elif 0.41 <= score <= 0.60:
+        return "★★★☆☆"
+    elif 0.61 <= score <= 0.80:
+        return "★★★★☆"
+    elif 0.81 <= score <= 1.00:
+        return "★★★★★"
+    return "☆☆☆☆☆"
+
+# Function to extract aspects using ABSA model
+def extract_aspects(review_text, absa_model):
+    aspects = ['quality', 'price', 'taste', 'freshness', 'packaging', 'delivery']
+    aspect_results = []
+
+    for aspect in aspects:
+        try:
+            result = absa_model(review_text, text_pair=aspect)
+            label = result[0]['label']
+            score = result[0]['score']
+            aspect_results.append({
+                'aspect': aspect,
+                'label': label,
+                'score': score
+            })
+        except Exception:
+            continue
+
+    # Sort by score descending and pick top 2
+    aspect_results.sort(key=lambda x: x['score'], reverse=True)
+    top_two = aspect_results[:2]
+
+    # Format as strings like "packaging: Negative (1.00)"
+    return [f"{res['aspect']}: {res['label']} ({res['score']:.2f})" for res in top_two]
+
+
+# Sidebar: Customer Support
 st.sidebar.header("💬 Customer Support")
 if st.sidebar.button("Chat with Us", key="chat_toggle"):
     st.session_state.show_chat = not st.session_state.show_chat
@@ -425,33 +476,36 @@ if st.sidebar.button("Chat with Us", key="chat_toggle"):
     else:
         st.session_state.chat_history.append({
             "user": "",
-            "bot": "<div class='farewell-message'>! Thank you ! Have a good day !</div>",
+            "bot": "Thank you! Have a good day!",
             "intent": "farewell",
             "product": None
         })
         st.session_state.last_intent = None
         st.session_state.last_product = None
         st.session_state.chat_history = []
-    st.rerun()
+        st.rerun()
+
 with st.sidebar:
     with st.expander("Customer Chat Window", expanded=st.session_state.show_chat):
         st.markdown("""
-            <style>
-                .farewell-message {
-                    background-color: #e6ffe6;
-                    padding: 10px;
-                    border-radius: 5px;
-                    text-align: center;
-                    color: #28a745;
-                    font-weight: bold;
-                }
-            </style>
+        <style>
+        .farewell-message {
+            background-color: #e6ffe6;
+            padding: 10px;
+            border-radius: 5px;
+            text-align: center;
+            color: #28a745;
+            font-weight: bold;
+        }
+        </style>
         """, unsafe_allow_html=True)
+
         user_input = st.text_input(
             "Ask about our products...",
             key=f"chat_input_{st.session_state.chat_input_counter}",
             value=""
         )
+
         if user_input and user_input != st.session_state.last_user_input:
             st.session_state.last_user_input = user_input
             response, intent, product = process_query(
@@ -469,17 +523,19 @@ with st.sidebar:
                 st.session_state.chat_input_counter += 1
                 st.session_state.last_user_input = None
                 st.rerun()
+
         if st.session_state.chat_history:
-            st.write("**Customer Chat History**")
-            for chat in st.session_state.chat_history[-5:][::-1]:  # Reverse to show newest first
-                st.markdown(f"**You**: {chat['user']}")
-                st.markdown(f"**Assistant**: {chat['bot']}", unsafe_allow_html=True)
+            st.write("Customer Chat History")
+            for chat in st.session_state.chat_history[-5:][::-1]:
+                st.markdown(f"You: {chat['user']}")
+                st.markdown(f"Assistant: {chat['bot']}", unsafe_allow_html=True)
                 st.markdown("---")
+
         if st.button("Close Chat", key=f"close_chat_{st.session_state.update_trigger}"):
             st.session_state.show_chat = False
             st.session_state.chat_history.append({
                 "user": "",
-                "bot": "<div class='farewell-message'>! Thank you ! Have a good day !</div>",
+                "bot": "Thank you! Have a good day!",
                 "intent": "farewell",
                 "product": None
             })
@@ -487,7 +543,123 @@ with st.sidebar:
             st.session_state.last_product = None
             st.session_state.chat_history = []
             st.rerun()
-# --- SIDEBAR: PROCUREMENT ASSISTANT ---
+
+# Sidebar: Customer Review Section
+st.sidebar.header("📝 Customer Review Section")
+with st.sidebar.expander("Leave a Review"):
+    if st.session_state.placed_orders:
+        st.write("Please review your recent orders:")
+
+        review_orders = []
+        for order in st.session_state.placed_orders:
+            for item in order['Items']:
+                numeric_part = order['Order ID'].split('-')[1]
+                date_part = '-'.join(order['Order ID'].split('-')[2:])
+                order_key = f"{order['Order ID']}_{item['Product']}"
+                review_status = st.session_state.customer_reviews.get(order_key, {
+                    'review': 'Not yet given',
+                    'star_rating': 'Not yet given',
+                    'emotion': 'Not yet given',
+                    'textual_rating': 'Not yet given',
+                    'aspects': 'Not yet given'
+                })
+                review_orders.append({
+                    'Order ID': order['Order ID'],
+                    'Date': order['Date'],
+                    'Product': item['Product'],
+                    'Quantity': item['Quantity'],
+                    'Current Stock': st.session_state.stock[st.session_state.stock['Product'] == item['Product']]['Available_Stock'].values[0],
+                    'Review': review_status['review'],
+                    'Star Rating': review_status['star_rating'],
+                    'Emotion': review_status['emotion'],
+                    'Textual Rating': review_status['textual_rating'],
+                    'Aspects': review_status['aspects']
+                })
+
+        if review_orders:
+            review_df = pd.DataFrame(review_orders)
+
+            def style_review_row(row):
+                if row['Review'] != 'Not yet given':
+                    return ['background-color: #d3d3d3; color: #666;'] * len(row)
+                return [''] * len(row)
+
+            st.dataframe(review_df.style.apply(style_review_row, axis=1))
+
+            available_reviews = [f"{row['Order ID']} - {row['Product']} ({row['Quantity']} {units[row['Product']]})"
+                                 for row in review_orders if row['Review'] == 'Not yet given']
+            if available_reviews:
+                selected_order = st.selectbox("Select Order to Review", available_reviews)
+
+                selected_order_id = selected_order.split(" - ")[0]
+                selected_product = selected_order.split(" - ")[1].split(" (")[0]
+
+                with st.form(key="review_form"):
+                    star_rating = st.selectbox(
+                        "Rate this product (1-5 stars)",
+                        options=["★☆☆☆☆", "★★☆☆☆", "★★★☆☆", "★★★★☆", "★★★★★"],
+                        index=2
+                    )
+
+                    review_text = st.text_area("Your Review", help="Share your experience with this product")
+                    submit_button = st.form_submit_button("Submit Review")
+
+                    if submit_button:
+                        order_key = f"{selected_order_id}_{selected_product}"
+
+                        if review_text.strip():
+                            try:
+                                absa_result = absa_model(review_text)
+                                emotion = absa_result[0]['label']
+                                score = absa_result[0]['score'] if emotion == 'Positive' else 1 - absa_result[0]['score']
+                                emoticon, textual_label = get_sentiment_emoticon(score)
+
+                                aspects = extract_aspects(review_text, absa_model)
+                                aspects_str = ", ".join(aspects) if isinstance(aspects, list) else aspects
+
+                                st.session_state.customer_reviews[order_key] = {
+                                    'review': review_text,
+                                    'star_rating': star_rating,
+                                    'emotion': f"{emotion} ({score:.2f})",
+                                    'textual_rating': f"{emoticon} {textual_label}",
+                                    'aspects': aspects_str,
+                                    'date': st.session_state.simulation_day.strftime('%Y-%m-%d')
+                                }
+                            except Exception as e:
+                                st.error(f"Error analyzing review: {str(e)}")
+                                st.session_state.customer_reviews[order_key] = {
+                                    'review': review_text,
+                                    'star_rating': star_rating,
+                                    'emotion': 'Analysis failed',
+                                    'textual_rating': 'Analysis failed',
+                                    'aspects': 'Analysis failed',
+                                    'date': st.session_state.simulation_day.strftime('%Y-%m-%d')
+                                }
+                        else:
+                            st.session_state.customer_reviews[order_key] = {
+                                'review': 'No text review provided',
+                                'star_rating': star_rating,
+                                'emotion': 'N/A',
+                                'textual_rating': 'N/A',
+                                'aspects': 'N/A',
+                                'date': st.session_state.simulation_day.strftime('%Y-%m-%d')
+                            }
+
+                        st.success("Thank you for your review!")
+                        st.write(f"Star Rating: {star_rating}")
+                        if review_text.strip():
+                            st.write(f"Detected Emotion: {emotion} (confidence: {score:.2f})")
+                            st.write(f"Textual Rating: {emoticon} {textual_label}")
+                            st.write(f"Aspects: {aspects_str}")
+                        st.rerun()
+            else:
+                st.info("All your orders have been reviewed. Thank you!")
+        else:
+            st.info("No orders available to review.")
+    else:
+        st.info("No orders placed yet to review.")
+
+# Sidebar: Procurement Assistant
 st.sidebar.header("🤝 Procurement Assistant")
 if st.sidebar.button("Procurement Chat", key="proc_chat_toggle"):
     st.session_state.show_proc_chat = not st.session_state.show_proc_chat
@@ -503,33 +675,36 @@ if st.sidebar.button("Procurement Chat", key="proc_chat_toggle"):
     else:
         st.session_state.proc_chat_history.append({
             "user": "",
-            "bot": "<div class='farewell-message'>! Thank you ! Have a good day !</div>",
+            "bot": "Thank you! Have a good day!",
             "intent": "farewell",
             "product": None
         })
         st.session_state.proc_last_intent = None
         st.session_state.proc_last_product = None
         st.session_state.proc_chat_history = []
-    st.rerun()
+        st.rerun()
+
 with st.sidebar:
     with st.expander("Procurement Chat Window", expanded=st.session_state.show_proc_chat):
         st.markdown("""
-            <style>
-                .farewell-message {
-                    background-color: #e6ffe6;
-                    padding: 10px;
-                    border-radius: 5px;
-                    text-align: center;
-                    color: #28a745;
-                    font-weight: bold;
-                }
-            </style>
+        <style>
+        .farewell-message {
+            background-color: #e6ffe6;
+            padding: 10px;
+            border-radius: 5px;
+            text-align: center;
+            color: #28a745;
+            font-weight: bold;
+        }
+        </style>
         """, unsafe_allow_html=True)
+
         proc_user_input = st.text_input(
             "Ask about procurement...",
             key=f"proc_chat_input_{st.session_state.proc_chat_input_counter}",
             value=""
         )
+
         if proc_user_input and proc_user_input != st.session_state.proc_last_user_input:
             st.session_state.proc_last_user_input = proc_user_input
             response, intent, product, supplier, trigger_supplier_quotes = process_procurement_query(
@@ -555,17 +730,19 @@ with st.sidebar:
                 st.session_state.proc_chat_input_counter += 1
                 st.session_state.proc_last_user_input = None
                 st.rerun()
+
         if st.session_state.proc_chat_history:
-            st.write("**Procurement Chat History**")
-            for chat in st.session_state.proc_chat_history[-5:][::-1]:  # Reverse to show newest first
-                st.markdown(f"**You**: {chat['user']}")
-                st.markdown(f"**Assistant**: {chat['bot']}", unsafe_allow_html=True)
+            st.write("Procurement Chat History")
+            for chat in st.session_state.proc_chat_history[-5:][::-1]:
+                st.markdown(f"You: {chat['user']}")
+                st.markdown(f"Assistant: {chat['bot']}", unsafe_allow_html=True)
                 st.markdown("---")
+
         if st.button("Close Procurement Chat", key=f"close_proc_chat_{st.session_state.update_trigger}"):
             st.session_state.show_proc_chat = False
             st.session_state.proc_chat_history.append({
                 "user": "",
-                "bot": "<div class='farewell-message'>! Thank you ! Have a good day !</div>",
+                "bot": "Thank you! Have a good day!",
                 "intent": "farewell",
                 "product": None
             })
@@ -573,7 +750,8 @@ with st.sidebar:
             st.session_state.proc_last_product = None
             st.session_state.proc_chat_history = []
             st.rerun()
-# --- SIDEBAR: SIMULATION CONTROL ---
+
+# Sidebar: Simulation Control
 st.sidebar.header("📆 Start your day!")
 if st.sidebar.button("Start Day"):
     st.session_state.day_started = True
@@ -583,7 +761,6 @@ if st.sidebar.button("Start Day"):
         base_prices,
         st.session_state.simulation_day
     )
-
 
 if st.sidebar.button("End Day"):
     ended_day = st.session_state.simulation_day
@@ -596,54 +773,59 @@ if st.sidebar.button("End Day"):
     st.success(
         f"✅ Day Ended: {ended_day.strftime('%Y-%m-%d')}. New day: {st.session_state.simulation_day.strftime('%Y-%m-%d')}"
     )
+
 # Only show main functionality if day is started
 if st.session_state.day_started:
-    # --- CUSTOMER ORDERING ---
+    # Customer Ordering
     st.subheader("🛍️ Place Your Order")
     product = st.selectbox("Select Product", st.session_state.stock['Product'])
     qty = st.number_input(f"Enter quantity for {product} ({units[product]})", min_value=1, step=1)
     if st.button("Add to Order"):
-        available = st.session_state.stock.loc[st.session_state.stock['Product'] == product, 'Available_Stock'].values[
-            0]
+        available = st.session_state.stock.loc[st.session_state.stock['Product'] == product, 'Available_Stock'].values[0]
         if qty > available:
             st.error(f"Only {available} {units[product]} of {product} available.")
         else:
             st.session_state.order_items.append({'Product': product, 'Quantity': qty})
             st.success(f"Added {qty} {units[product]} of {product} to order.")
-    if st.session_state.order_items:
-        st.subheader("🧾 Current Order")
-        st.dataframe(pd.DataFrame(st.session_state.order_items))
-        if st.button("Done"):
-            order_id = f"Order-{st.session_state.order_count}"
-            for item in st.session_state.order_items:
-                idx = st.session_state.stock[
-                    st.session_state.stock['Product'] == item['Product']].index[0]
-                st.session_state.stock.at[idx, 'Available_Stock'] -= item['Quantity']
-                item['Order ID'] = order_id
-            st.session_state.placed_orders.append({
-                'Order ID': order_id,
-                'Items': st.session_state.order_items,
-                'Date': st.session_state.simulation_day.strftime('%Y-%m-%d')
-            })
-            st.session_state.order_items = []
-            st.session_state.order_count += 1
-            st.success("Order placed and stock updated.")
-    # --- INVENTORY STATUS ---
+
+    if st.button("Done"):
+        order_date_str = st.session_state.simulation_day.strftime('%Y-%m-%d')
+        order_id = f"Order-{st.session_state.order_count}-{order_date_str}"
+        for item in st.session_state.order_items:
+            idx = st.session_state.stock[
+                st.session_state.stock['Product'] == item['Product']].index[0]
+            st.session_state.stock.at[idx, 'Available_Stock'] -= item['Quantity']
+            item['Order ID'] = order_id
+        st.session_state.placed_orders.append({
+            'Order ID': order_id,
+            'Items': st.session_state.order_items,
+            'Date': order_date_str
+        })
+        st.session_state.order_items = []
+        st.session_state.order_count += 1
+        st.success("Order placed and stock updated.")
+        st.rerun()
+
+    # Inventory Status
     st.subheader(f"📦 Updated Inventory Schedule as on {st.session_state.simulation_day.strftime('%Y-%m-%d')}")
+
     def get_stock_status(row):
         if row['Available_Stock'] < row['ROL']:
             return 'Below Reorder Level'
         elif row['Available_Stock'] == row['ROL']:
             return 'At Reorder Level'
         return 'Sufficient Stock'
+
     def calculate_to_be_ordered(row):
         if row['Available_Stock'] <= row['ROL']:
             return row['Max_Stock'] - row['Available_Stock']
         return 'N/A'
+
     def calculate_time_to_stock_out(row):
         if row['Available_Stock'] <= row['ROL']:
             return f"{row['Available_Stock'] / row['Demand_Rate_per_Day']:.1f}"
         return 'N/A'
+
     def color_row(row):
         color = ''
         if row['Stock_Status'] == 'Below Reorder Level':
@@ -651,25 +833,31 @@ if st.session_state.day_started:
         elif row['Stock_Status'] == 'At Reorder Level':
             color = 'background-color: orange; animation: blink 1s infinite;'
         return [color] * len(row)
-    st.markdown("""<style>
-        @keyframes blink {0% { opacity: 1; } 50% { opacity: 0.5; } 100% { opacity: 1; }}
-    </style>""", unsafe_allow_html=True)
+
+    st.markdown("""
+    <style>
+    @keyframes blink {
+        0% { opacity: 1; }
+        50% { opacity: 0.5; }
+        100% { opacity: 1; }
+    }
+    </style>
+    """, unsafe_allow_html=True)
+
     st.session_state.stock['Stock_Status'] = st.session_state.stock.apply(get_stock_status, axis=1)
     st.session_state.stock['To_be_Ordered'] = st.session_state.stock.apply(calculate_to_be_ordered, axis=1)
     st.session_state.stock['Time_to_Stock_Out'] = st.session_state.stock.apply(calculate_time_to_stock_out, axis=1)
     styled = st.session_state.stock.style.apply(color_row, axis=1)
     st.markdown(styled.to_html(), unsafe_allow_html=True)
-    # --- SUPPLIER QUOTES ---
 
-    # Supplier City Mapping
+    # Supplier Quotes
     supplier_city = {
-        'Supplier A': 'Pune',
-        'Supplier B': 'Chennai',
-        'Supplier C': 'Hyderabad',
-        'Supplier D': 'Surat',
-        'Supplier E': 'Nagpur'
+        'Supplier A': 'pune',
+        'Supplier B': 'chennai',
+        'Supplier C': 'bengaluru',
+        'Supplier D': 'surat',
+        'Supplier E': 'nagpur'
     }
-
 
     show_supplier_quotes = False
     for row in st.session_state.stock.itertuples():
@@ -678,6 +866,7 @@ if st.session_state.day_started:
                 not isinstance(row.To_be_Ordered, str)):
             show_supplier_quotes = True
             break
+
     if show_supplier_quotes:
         st.subheader("💬 Supplier Quotes (Top 5 Cheapest per Product)")
         for row in st.session_state.stock.itertuples():
@@ -685,10 +874,10 @@ if st.session_state.day_started:
                 product = row.Product
                 if st.session_state.order_placed.get(product, False):
                     continue
-                to_order = row.Max_Stock - row.Available_Stock  # Recalculate to ensure latest stock values
+                to_order = row.Max_Stock - row.Available_Stock
                 if isinstance(to_order, str) or to_order <= 0:
                     continue
-                # Generate fresh supplier quotes with updated to_order
+
                 mean_price = base_prices[product]
                 quotes = []
                 for i in range(5):
@@ -702,140 +891,70 @@ if st.session_state.day_started:
                         'Total Cost (Rs.)': rate * to_order,
                         'Promised Days': promised_days
                     })
-                # Only update quotes if not already exists
+
                 if product not in st.session_state.supplier_quotes:
                     st.session_state.supplier_quotes[product] = sorted(quotes, key=lambda x: x['Total Cost (Rs.)'])
+
                 df = pd.DataFrame(st.session_state.supplier_quotes[product])
                 selection = st.radio(f"Choose Supplier for {product}", df['Supplier'], key=f"select_{product}")
-                # Supplier-City Mapping
-                supplier_city = {
-                    'Supplier A': 'Pune',
-                    'Supplier B': 'Chennai',
-                    'Supplier C': 'Hyderabad',
-                    'Supplier D': 'Surat',
-                    'Supplier E': 'Nagpur'
-                }
-
 
                 def fetch_weather_news(city, api_key='5b4c4d76315e4132b5d5efa76f306db1'):
-                    """
-                    Fetches recent weather-related news articles for a given city.
-
-                    Args:
-                        city (str): The city name to search for weather news
-                        api_key (str): Your NewsAPI API key
-
-                    Returns:
-                        list: List of dictionaries containing headline, source, summary, and URL
-                              Returns empty list on error
-                    """
                     try:
-                        # Date range - exactly like your working code
-                        two_days_ago = (datetime.now() - timedelta(days=2)).strftime('%Y-%m-%d')
+                        four_days_ago = (datetime.now() - timedelta(days=4)).strftime('%Y-%m-%d')
                         today = datetime.now().strftime('%Y-%m-%d')
-
-                        # NewsAPI parameters - matching your working structure
                         url = 'https://newsapi.org/v2/everything'
                         params = {
-                            'q': f'{city} weather',
-                            'from': two_days_ago,
+                            'q': f'{city} weather OR {city} forecast',
+                            'sources': 'the-times-of-india,the-hindu',
+                            'from': four_days_ago,
                             'to': today,
-                            'sortBy': 'popularity',
+                            'sortBy': 'publishedAt',
                             'language': 'en',
                             'pageSize': 10,
                             'apiKey': api_key
                         }
-
-                        # Fetch data - exactly like your working code
                         response = requests.get(url, params=params)
-
-                        # Debug information
-                        print(f"Response status code: {response.status_code}")
-                        print(f"Response headers: {response.headers.get('content-type', 'Unknown')}")
-
-                        # Try to parse JSON first, then check status
-                        try:
-                            data = response.json()
-                        except requests.exceptions.JSONDecodeError as e:
-                            print(f"JSON decode error: {e}")
-                            print(f"Response content: {response.text[:500]}")
+                        if response.status_code != 200:
                             return []
-                        except ValueError as e:
-                            print(f"Value error parsing JSON: {e}")
-                            print(f"Response content: {response.text[:500]}")
+                        data = response.json()
+                        if data.get('status') != 'ok':
                             return []
-
-                        # Check response status - matching your working code logic
-                        if response.status_code != 200 or data.get('status') != 'ok':
-                            print("Error fetching data:", data)
-                            return []
-
                         articles = data.get('articles', [])
                         if not articles:
-                            print("No articles found.")
                             return []
-
-                        print(f"Found {len(articles)} articles on {params['q']}")
                         results = []
-
                         for i, article in enumerate(articles, 1):
-                            # Get article details
                             title = article.get('title')
                             source = article.get('source', {}).get('name')
-                            published = article.get('popularity')
                             article_url = article.get('url')
-
-                            # Skip if missing essential fields
                             if not title or not article_url:
                                 continue
-
-                            # Try to download and extract full text - exactly like your working code
                             try:
                                 downloaded = trafilatura.fetch_url(article_url)
-                                full_text = trafilatura.extract(
-                                    downloaded) if downloaded else '[Could not download content]'
-                            except Exception as e:
-                                full_text = f'[Error: {e}]'
-
-                            # Create summary from full text
-                            summary = full_text[:400] + "..." if full_text and len(full_text) > 400 else (
-                                    full_text or "No content available.")
-
+                                full_text = trafilatura.extract(downloaded) if downloaded else '[Could not download content]'
+                            except Exception:
+                                full_text = '[Error downloading content]'
+                            summary = full_text[:400] + "..." if full_text and len(full_text) > 400 else full_text
                             results.append({
                                 'Headline': title,
                                 'Content Summary': summary,
                                 'Source': source or 'Unknown',
-                                'URL': article_url,
-                                'Published': published
+                                'URL': article_url
                             })
-
-                            time.sleep(1)  # Respect rate limits
-
+                            time.sleep(1)
                         return results
-
-                    except requests.exceptions.RequestException as e:
-                        print(f"Network error fetching weather news: {str(e)}")
-                        return []
-                    except Exception as e:
-                        print(f"Unexpected error processing weather news: {str(e)}")
-                        import traceback
-                        traceback.print_exc()
+                    except Exception:
                         return []
 
-                # Show dynamic button
                 selected_supplier = st.session_state[f"select_{product}"]
                 city = supplier_city.get(selected_supplier, 'Unknown')
                 weather_button_label = f"🌤️ Know the news around {selected_supplier}"
-
                 if st.button(weather_button_label, key=f"weather_{product}"):
                     with st.spinner("Fetching latest weather news..."):
                         weather_news = fetch_weather_news(city)
                         if weather_news:
-                            # Convert list of dicts to DataFrame
                             news_df = pd.DataFrame(weather_news)[['Headline', 'Content Summary', 'Source']]
-
-                            # Show table
-                            st.markdown(f"### 🌤️ Weather News for **{city}**")
+                            st.markdown(f"### 🌤️ Weather News for {city}")
                             st.dataframe(news_df, use_container_width=True, hide_index=True)
                         else:
                             st.info("No weather news found.")
@@ -846,7 +965,7 @@ if st.session_state.day_started:
                     rate = float(quote['Rate per Unit (Rs.)'].strip('₹'))
                     promised_days = quote['Promised Days']
                     lead_time_days = int(st.session_state.stock.loc[
-                                             st.session_state.stock['Product'] == product, 'Lead_Time_days'].values[0])
+                        st.session_state.stock['Product'] == product, 'Lead_Time_days'].values[0])
                     procurement_order = {
                         'Product': product,
                         'Supplier': selection,
@@ -864,13 +983,13 @@ if st.session_state.day_started:
                     st.session_state.procurement_orders.append(procurement_order)
                     st.session_state.order_placed[product] = True
                     st.success(f"{to_order} {units[product]} of {product} ordered from {selection}.")
-                    # Send order placement confirmation email
+
                     msg = EmailMessage()
                     msg.set_content(
                         f"Dear {selection},\n\nThank you for accepting our order of {to_order} {units[product]} of {product}, "
                         f"placed on {st.session_state.simulation_day.strftime('%Y-%m-%d')}. "
-                        f"The order is expected to be delivered by {procurement_order['Promised_Date'].strftime('%Y-%m-%d')}.\n\n"
-                        f"Order Details:\n"
+                        f"The order is expected to be delivered by {procurement_order['Promised_Date'].strftime('%Y-%m-%d')}."
+                        f"\n\nOrder Details:\n"
                         f"- Product: {product}\n"
                         f"- Supplier: {selection}\n"
                         f"- Units Ordered: {to_order} {units[product]}\n"
@@ -880,8 +999,7 @@ if st.session_state.day_started:
                         f"Please confirm receipt of this order and ensure timely delivery.\n\n"
                         f"Regards,\nBuyer"
                     )
-                    msg[
-                        'Subject'] = f"Order Confirmation for {product} - Placed on {st.session_state.simulation_day.strftime('%Y-%m-%d')}"
+                    msg['Subject'] = f"Order Confirmation for {product} - Placed on {st.session_state.simulation_day.strftime('%Y-%m-%d')}"
                     msg['From'] = "supplier123.sample@gmail.com"
                     msg['To'] = "supplier123.sample@gmail.com"
                     try:
@@ -894,8 +1012,7 @@ if st.session_state.day_started:
                         st.error(f"Failed to send order confirmation email for {product} to {selection}: {str(e)}")
                     st.rerun()
 
-
-    # --- PROCUREMENT TRACKING ---
+    # Procurement Tracking
     if st.session_state.procurement_orders:
         st.subheader("🚚 Procurement Order Tracking")
         df_proc = pd.DataFrame(st.session_state.procurement_orders)
@@ -905,16 +1022,40 @@ if st.session_state.day_started:
         df_proc['Status'] = df_proc.apply(
             lambda x: "Overdue" if not x['Received'] and (st.session_state.simulation_day - x['Order_Date']).days > x[
                 'Promised Days'] else "", axis=1)
+
         st.markdown("""
         <style>
-            @keyframes blink {0% { opacity: 1; } 50% { opacity: 0.5; } 100% { opacity: 1; }}
-            .stDataEditor { border-collapse: collapse; width: 100%; }
-            .stDataEditor th, .stDataEditor td { border: 1px solid black; padding: 8px; text-align: left; }
-            .stDataEditor th { background-color: #f2f2f2; }
-            .overdue { background-color: #ffcccc; color: red; animation: blink 1s infinite; }
-            .warning-box { background-color: #fff3cd; border-left: 5px solid #ffc107; padding: 10px; margin: 10px 0; }
+        @keyframes blink {
+            0% { opacity: 1; }
+            50% { opacity: 0.5; }
+            100% { opacity: 1; }
+        }
+        .stDataEditor {
+            border-collapse: collapse;
+            width: 100%;
+        }
+        .stDataEditor th, .stDataEditor td {
+            border: 1px solid black;
+            padding: 8px;
+            text-align: left;
+        }
+        .stDataEditor th {
+            background-color: #f2f2f2;
+        }
+        .overdue {
+            background-color: #ffcccc;
+            color: red;
+            animation: blink 1s infinite;
+        }
+        .warning-box {
+            background-color: #fff3cd;
+            border-left: 5px solid #ffc107;
+            padding: 10px;
+            margin: 10px 0;
+        }
         </style>
         """, unsafe_allow_html=True)
+
         due_today_orders = df_proc[(df_proc['Received'] == False) &
                                    (df_proc.apply(
                                        lambda x: (st.session_state.simulation_day - x['Order_Date']).days == x[
@@ -922,14 +1063,13 @@ if st.session_state.day_started:
         if not due_today_orders.empty:
             st.markdown("""
             <div class="warning-box">
-                <strong>⚠️ DUE TODAY ALERT!</strong> The following orders are to be delivered today:
-                <ul>
-            """ + "\n".join([
-                f"<li>{row['Product']} from {row['Supplier']} (Ordered: {row['Order_Date'].strftime('%Y-%m-%d')}, Promised: {row['Promised_Date'].strftime('%Y-%m-%d')})</li>"
-                for _, row in due_today_orders.iterrows()]) + """
-                </ul>
+            ⚠️ DUE TODAY ALERT! The following orders are to be delivered today:
+            """ + "\n".join([f"""
+            {row['Product']} from {row['Supplier']} (Ordered: {row['Order_Date'].strftime('%Y-%m-%d')}, Promised: {row['Promised_Date'].strftime('%Y-%m-%d')})
+            """ for _, row in due_today_orders.iterrows()]) + """
             </div>
             """, unsafe_allow_html=True)
+
             for idx, row in due_today_orders.iterrows():
                 order_key = f"{idx}_{st.session_state.simulation_day.strftime('%Y-%m-%d')}"
                 if order_key not in st.session_state.sent_reminders:
@@ -947,8 +1087,7 @@ if st.session_state.day_started:
                         f"- Total Cost: {row['Total Cost']}\n\n"
                         f"Regards,\nBuyer"
                     )
-                    msg[
-                        'Subject'] = f"Reminder for the {row['Product']} order placed on {row['Order_Date'].strftime('%Y-%m-%d')}"
+                    msg['Subject'] = f"Reminder for the {row['Product']} order placed on {row['Order_Date'].strftime('%Y-%m-%d')}"
                     msg['From'] = "supplier123.sample@gmail.com"
                     msg['To'] = "supplier123.sample@gmail.com"
                     try:
@@ -960,28 +1099,28 @@ if st.session_state.day_started:
                         st.session_state.sent_reminders[order_key] = True
                     except Exception as e:
                         st.error(f"Failed to send reminder email for {row['Product']} from {row['Supplier']}: {str(e)}")
-        overdue_orders = df_proc[(df_proc['Received'] == False) &
-                                 (df_proc['Status'] == "Overdue")]
+
+        overdue_orders = df_proc[(df_proc['Received'] == False) & (df_proc['Status'] == "Overdue")]
         if not overdue_orders.empty:
             st.markdown("""
             <div class="warning-box">
-                <strong>⚠️ OVERDUE ALERT!</strong> The following orders are overdue:
-                <ul>
-            """ + "\n".join([
-                f"<li>{row['Product']} from {row['Supplier']} (Ordered: {row['Order_Date'].strftime('%Y-%m-%d')}, Promised: {row['Promised_Date'].strftime('%Y-%m-%d')})</li>"
-                for _, row in overdue_orders.iterrows()]) + """
-                </ul>
+            ⚠️ OVERDUE ALERT! The following orders are overdue:
+            """ + "\n".join([f"""
+            {row['Product']} from {row['Supplier']} (Ordered: {row['Order_Date'].strftime('%Y-%m-%d')}, Promised: {row['Promised_Date'].strftime('%Y-%m-%d')})
+            """ for _, row in overdue_orders.iterrows()]) + """
             </div>
             """, unsafe_allow_html=True)
+
         def style_procurement_row(row):
             styles = [''] * len(row)
             if row['Status'] == "Overdue" and not row['Received']:
                 styles = ['background-color: #ffcccc; color: red; animation: blink 1s infinite;'] * len(row)
             return styles
+
         if not df_proc.empty:
-            disabled_columns = ["Product", "Supplier", "Units Ordered", "Rate per Unit", "Total Cost",
-                                "Order_Date", "Promised Days", "Promised_Date", "Lead_Time_days",
-                                "Lead_Time_Date", "Order_Placed", "Days Left", "Status"]
+            disabled_columns = ["Product", "Supplier", "Units Ordered", "Rate per Unit", "Total Cost", "Order_Date",
+                                "Promised Days", "Promised_Date", "Lead_Time_days", "Lead_Time_Date", "Order_Placed",
+                                "Days Left", "Status"]
             edited_df = st.data_editor(
                 df_proc.style.apply(style_procurement_row, axis=1),
                 column_config={
@@ -994,21 +1133,18 @@ if st.session_state.day_started:
                     "Promised Days": st.column_config.NumberColumn(width="small"),
                     "Promised_Date": st.column_config.DateColumn("Promised Date", format="YYYY-MM-DD", width="medium"),
                     "Lead_Time_days": st.column_config.NumberColumn("Lead Time Days", width="small"),
-                    "Lead_Time_Date": st.column_config.DateColumn("Lead Time Date", format="YYYY-MM-DD",
-                                                                  width="medium"),
+                    "Lead_Time_Date": st.column_config.DateColumn("Lead Time Date", format="YYYY-MM-DD", width="medium"),
                     "Order_Placed": st.column_config.TextColumn(width="small"),
                     "Days Left": st.column_config.NumberColumn(width="small"),
                     "Status": st.column_config.TextColumn("Status", width="small"),
                     "Received": st.column_config.CheckboxColumn(
-                        "Received",
-                        help="Check to mark as received",
-                        default=False
-                    )
+                        "Received", help="Check to mark as received", default=False)
                 },
                 disabled=disabled_columns,
                 hide_index=True,
                 key=f"procurement_editor_{st.session_state.update_trigger}"
             )
+
             for idx, row in edited_df.iterrows():
                 original_order = st.session_state.procurement_orders[idx]
                 if row['Received'] and not original_order['Received'] and idx not in st.session_state.checked_rows:
@@ -1021,58 +1157,81 @@ if st.session_state.day_started:
                         'total_cost': row['Total Cost'],
                         'order_date': row['Order_Date']
                     }
-        if st.session_state.pending_confirmation:
-            pending = st.session_state.pending_confirmation
-            st.warning(
-                f"Can you confirm that the order from {pending['supplier']} for {pending['units_ordered']} "
-                f"{units[pending['product']]} of {pending['product']} at {pending['total_cost']} "
-                f"ordered on {pending['order_date']} has been received?"
-            )
-            col1, col2 = st.columns(2)
-            with col1:
-                if st.button("OK", key=f"confirm_{pending['index']}"):
-                    idx = pending['index']
-                    product = pending['product']
-                    units_ordered = pending['units_ordered']
-                    idx_stock = st.session_state.stock[st.session_state.stock['Product'] == product].index[0]
-                    st.session_state.stock.at[idx_stock, 'Available_Stock'] += units_ordered
-                    max_stock = st.session_state.stock.at[idx_stock, 'Max_Stock']
-                    st.session_state.stock.at[idx_stock, 'Available_Stock'] = min(
-                        st.session_state.stock.at[idx_stock, 'Available_Stock'], max_stock)
-                    lead_time = st.session_state.stock.loc[
-                        st.session_state.stock['Product'] == product, 'Lead_Time_days'].values[0]
-                    promised_days = st.session_state.procurement_orders[idx]['Promised Days']
-                    delay_days = (st.session_state.simulation_day - (
-                            pending['order_date'] + timedelta(days=int(promised_days)))).days
-                    st.session_state.procurement_orders[idx]['Received'] = True
-                    st.session_state.procurement_orders[idx]['Days_Delay'] = max(0, delay_days)
-                    st.session_state.order_placed[product] = False
-                    st.session_state.pending_confirmation = None
-                    st.session_state.update_trigger += 1
-                    # Clear supplier quotes to regenerate with updated stock
-                    st.session_state.supplier_quotes = {}
-                    st.rerun()
-            with col2:
-                if st.button("Cancel", key=f"cancel_{pending['index']}"):
-                    st.session_state.checked_rows.discard(pending['index'])
-                    st.session_state.pending_confirmation = None
-                    st.rerun()
-    # --- CUSTOMER ORDER SUMMARY ---
+
+            if st.session_state.pending_confirmation:
+                pending = st.session_state.pending_confirmation
+                st.warning(
+                    f"Can you confirm that the order from {pending['supplier']} for {pending['units_ordered']} "
+                    f"{units[pending['product']]} of {pending['product']} at {pending['total_cost']} "
+                    f"ordered on {pending['order_date']} has been received?"
+                )
+                col1, col2 = st.columns(2)
+                with col1:
+                    if st.button("OK", key=f"confirm_{pending['index']}"):
+                        idx = pending['index']
+                        product = pending['product']
+                        units_ordered = pending['units_ordered']
+                        idx_stock = st.session_state.stock[st.session_state.stock['Product'] == product].index[0]
+                        st.session_state.stock.at[idx_stock, 'Available_Stock'] += units_ordered
+                        max_stock = st.session_state.stock.at[idx_stock, 'Max_Stock']
+                        st.session_state.stock.at[idx_stock, 'Available_Stock'] = min(
+                            st.session_state.stock.at[idx_stock, 'Available_Stock'], max_stock)
+                        lead_time = st.session_state.stock.loc[
+                            st.session_state.stock['Product'] == product, 'Lead_Time_days'].values[0]
+                        promised_days = st.session_state.procurement_orders[idx]['Promised Days']
+                        delay_days = (st.session_state.simulation_day - (
+                                pending['order_date'] + timedelta(days=int(promised_days)))).days
+                        st.session_state.procurement_orders[idx]['Received'] = True
+                        st.session_state.procurement_orders[idx]['Days_Delay'] = max(0, delay_days)
+                        st.session_state.order_placed[product] = False
+                        st.session_state.pending_confirmation = None
+                        st.session_state.update_trigger += 1
+                        st.session_state.supplier_quotes = {}
+                        st.rerun()
+                with col2:
+                    if st.button("Cancel", key=f"cancel_{pending['index']}"):
+                        st.session_state.checked_rows.discard(pending['index'])
+                        st.session_state.pending_confirmation = None
+                        st.rerun()
+
+    # Customer Order Summary
     if st.session_state.placed_orders:
         st.subheader("🧑‍🤝‍🧑 Customers' Order Summary")
         all_orders = []
         for order in st.session_state.placed_orders:
             for item in order['Items']:
+                order_key = f"{order['Order ID']}_{item['Product']}"
+                review_status = st.session_state.customer_reviews.get(order_key, {
+                    'review': 'Not yet given',
+                    'emotion': 'Not yet given',
+                    'textual_rating': 'Not yet given',
+                    'star_rating': 'Not yet given',
+                    'aspects': 'Not yet given'
+                })
+
+                # Convert list-based fields to strings
+                aspects_str = ", ".join(review_status['aspects']) if isinstance(review_status['aspects'], list) else review_status['aspects']
+                review_str = review_status['review'] if isinstance(review_status['review'], str) else "Not yet given"
+                emotion_str = review_status['emotion'] if isinstance(review_status['emotion'], str) else "Not yet given"
+                textual_rating_str = review_status['textual_rating'] if isinstance(review_status['textual_rating'], str) else "Not yet given"
+                star_rating_str = review_status['star_rating'] if isinstance(review_status['star_rating'], str) else "Not yet given"
+
                 all_orders.append({
                     'Order ID': order['Order ID'],
                     'Date': order['Date'],
                     'Product': item['Product'],
                     'Quantity': item['Quantity'],
-                    'Current Stock': st.session_state.stock[
-                        st.session_state.stock['Product'] == item['Product']]['Available_Stock'].values[0]
+                    'Current Stock': st.session_state.stock[st.session_state.stock['Product'] == item['Product']]['Available_Stock'].values[0],
+                    'Review': review_str,
+                    'Emotion': emotion_str,
+                    'Textual Rating': textual_rating_str,
+                    'Star Rating': star_rating_str,
+                    'Aspects': aspects_str
                 })
-        st.dataframe(pd.DataFrame(all_orders))
-    # --- SUPPLIER PERFORMANCE REPORT ---
+        if all_orders:
+            st.dataframe(pd.DataFrame(all_orders))
+
+    # Supplier Performance Report
     if st.sidebar.button("Show Supplier Performance Report"):
         st.subheader("📊 Supplier Performance Report (Last 10 Days)")
         st.session_state.supplier_performance = {}
@@ -1097,6 +1256,7 @@ if st.session_state.day_started:
             st.session_state.supplier_performance[supplier][product]['total_delay'] += delay_days
             st.session_state.supplier_performance[supplier][product]['total_price'] += price
             st.session_state.supplier_performance[supplier][product]['count'] += 1
+
         supplier_performance = {
             'Supplier': [],
             'Product': [],
@@ -1115,6 +1275,7 @@ if st.session_state.day_started:
                 supplier_performance['Average Price (Rs.)'].append(
                     round(metrics['total_price'] / metrics['count'], 2) if metrics['count'] > 0 else 0)
                 supplier_performance['Base Price (Rs.)'].append(metrics['base_price'])
+
         performance_df = pd.DataFrame(supplier_performance)
         if not performance_df.empty:
             st.dataframe(performance_df)
