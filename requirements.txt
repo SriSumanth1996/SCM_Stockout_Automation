@@ -14,3 +14,4 @@ transformers
 torch
 requests
 sentencepiece
+accelerate
