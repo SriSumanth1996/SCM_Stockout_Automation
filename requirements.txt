@@ -10,3 +10,5 @@ faster-whisper
 pyaudio
 wave
 trafilatura
+transformers
+requests
