@@ -420,20 +420,6 @@ def get_sentiment_emoticon(score):
         return "🤩", "Delighted"
     return "❓", "Unknown"
 
-# Function to map sentiment score to star rating (1–5)
-def get_star_rating(score):
-    if 0.00 <= score <= 0.20:
-        return "★☆☆☆☆"
-    elif 0.21 <= score <= 0.40:
-        return "★★☆☆☆"
-    elif 0.41 <= score <= 0.60:
-        return "★★★☆☆"
-    elif 0.61 <= score <= 0.80:
-        return "★★★★☆"
-    elif 0.81 <= score <= 1.00:
-        return "★★★★★"
-    return "☆☆☆☆☆"
-
 # Function to extract aspects using ABSA model
 def extract_aspects(review_text, absa_model):
     aspects = ['quality', 'price', 'taste', 'freshness', 'packaging', 'delivery']
