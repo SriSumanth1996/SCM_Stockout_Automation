@@ -11,4 +11,5 @@ pyaudio
 wave
 trafilatura
 transformers
+torch
 requests
