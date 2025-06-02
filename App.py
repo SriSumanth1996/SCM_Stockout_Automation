@@ -163,7 +163,7 @@ st.title(f"🛒 Product Ordering App - {st.session_state.simulation_day.strftime
 
 # Function to generate product analysis data for bar graph
 def generate_product_analysis_data(product, customer_reviews):
-    aspects = ['quality', 'price', 'taste', 'freshness', 'packaging', 'delivery']
+    aspects = ['quality', 'price', 'taste', 'freshness', 'packaging']
     positive_scores = {aspect: [] for aspect in aspects}
     negative_scores = {aspect: [] for aspect in aspects}
 
@@ -456,7 +456,7 @@ def analyze_emotion_from_top_aspects(review_text, absa_model):
         if not review_text.strip() or not absa_model:
             return "neutral", 0.5
 
-        aspects = ['quality', 'price', 'taste', 'freshness', 'packaging', 'delivery']
+        aspects = ['quality', 'price', 'taste', 'freshness', 'packaging']
         positive_scores = {}
         negative_scores = {}
 
@@ -561,7 +561,7 @@ def extract_aspects(review_text, absa_model):
         return default_return
 
     try:
-        aspects = ['quality', 'price', 'taste', 'freshness', 'packaging', 'delivery']
+        aspects = ['quality', 'price', 'taste', 'freshness', 'packaging']
         positive_aspects = []
         negative_aspects = []
 
