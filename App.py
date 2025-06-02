@@ -12,6 +12,7 @@ import requests
 import time
 from transformers import pipeline, AutoModelForSequenceClassification, AutoTokenizer
 from fuzzywuzzy import process
+import plotly.graph_objects as go
 
 # Initialize ABSA model (used for both aspects and emotion)
 try:
@@ -28,8 +29,6 @@ except Exception as e:
     st.error(f"Failed to load ABSA model: {str(e)}")
     absa_model = None
     emotion_model = None
-
-
 
 # Get API key from Streamlit secrets or environment variable
 groq_api_key = st.secrets.get("GROQ_API_KEY")
@@ -49,6 +48,7 @@ if not groq_api_key:
     Replace gsk_...YceG with your full API key from Groq.
     """)
     st.stop()
+
 
 def calculate_supplier_performance(procurement_orders, base_prices, simulation_day):
     supplier_performance = {}
@@ -80,6 +80,7 @@ def calculate_supplier_performance(procurement_orders, base_prices, simulation_d
         sp['count'] += 1
 
     return supplier_performance
+
 
 # Initialize Groq client
 try:
@@ -158,6 +159,50 @@ for key, value in {
 
 # Title
 st.title(f"🛒 Product Ordering App - {st.session_state.simulation_day.strftime('%Y-%m-%d')}")
+
+
+# Function to generate product analysis data for bar graph
+def generate_product_analysis_data(product, customer_reviews):
+    aspects = ['quality', 'price', 'taste', 'freshness', 'packaging', 'delivery']
+    positive_scores = {aspect: [] for aspect in aspects}
+    negative_scores = {aspect: [] for aspect in aspects}
+
+    # Collect scores for the selected product
+    for order_key, review_data in customer_reviews.items():
+        if product in order_key:
+            positive_aspects = review_data.get('positive_aspects', '')
+            negative_aspects = review_data.get('negative_aspects', '')
+
+            # Process positive aspects
+            if positive_aspects and positive_aspects != 'Not yet given' and positive_aspects != 'Analysis failed':
+                for aspect_str in positive_aspects.split(', '):
+                    if aspect_str:
+                        try:
+                            aspect, score = aspect_str.split(' (')
+                            score = float(score.rstrip(')'))
+                            if aspect in positive_scores:
+                                positive_scores[aspect].append(score)
+                        except:
+                            continue  # Skip malformed entries
+
+            # Process negative aspects
+            if negative_aspects and negative_aspects != 'Not yet given' and negative_aspects != 'Analysis failed':
+                for aspect_str in negative_aspects.split(', '):
+                    if aspect_str:
+                        try:
+                            aspect, score = aspect_str.split(' (')
+                            score = float(score.rstrip(')'))
+                            if aspect in negative_scores:
+                                negative_scores[aspect].append(score)
+                        except:
+                            continue  # Skip malformed entries
+
+    # Calculate average scores
+    avg_positive = [np.mean(positive_scores[aspect]) if positive_scores[aspect] else 0 for aspect in aspects]
+    avg_negative = [np.mean(negative_scores[aspect]) if negative_scores[aspect] else 0 for aspect in aspects]
+
+    return aspects, avg_positive, avg_negative
+
 
 # Customer Chatbot
 def process_query(query, stock_df, base_prices, units, product_descriptions, client):
@@ -263,7 +308,9 @@ def process_query(query, stock_df, base_prices, units, product_descriptions, cli
         st.error(f"Groq API error: {str(e)}. Please check your API key or network connection.")
         return "Sorry, I'm having trouble processing your query. Please try again!", "unclear", None
 
-def process_procurement_query(query, stock_df, supplier_quotes, procurement_orders, supplier_performance, base_prices, units, client, st):
+
+def process_procurement_query(query, stock_df, supplier_quotes, procurement_orders, supplier_performance, base_prices,
+                              units, client, st):
     if not query.strip():
         return "Please enter a valid query.", "unclear", None, None, False
 
@@ -369,9 +416,7 @@ def process_procurement_query(query, stock_df, supplier_quotes, procurement_orde
     For 'lead_time', provide the lead time for the product from stock_info (e.g., "Lead time for Oil is 7 days").
     For 'stock_out_risk', list products where Available_Stock / Demand_Rate_per_Day < Lead_Time_days, showing days until stock-out. If none, say "No immediate stock-out risks."
     For 'order_cost', calculate cost for the specified quantity using the cheapest supplier’s rate. If no quantity specified, use (Max_Stock - Available_Stock).
-    For 'supplier_performance', provide average delay, order count, and price deviation from base price for the supplier/product.
-    For 'general_supplier_performance', summarize supplier’s performance across all products (products supplied, average delay, average price deviation %).
-    For 'supplier_contact', provide a placeholder email (e.g., "Contact Supplier A at supplierA@bitsomgourmet.com").
+    For 'suppliers', provide a placeholder email (e.g., "Contact Supplier A at supplierA@bitsomgourmet.com").
     For 'greeting', welcome and suggest asking about procurement tasks.
     For 'unclear', infer intent/product from history (e.g., "What about them?" after 'below_rol' refers to those products). Otherwise, ask for clarification.
     Reference prior exchanges naturally (e.g., "As we discussed about Milk...").
@@ -426,7 +471,7 @@ def analyze_emotion_from_top_aspects(review_text, absa_model):
                         positive_scores[aspect] = score
                     elif label == 'negative':
                         negative_scores[aspect] = score
-            except Exception as e:
+            except Exception:
                 continue
 
         # If no aspects detected, return neutral
@@ -503,6 +548,7 @@ def analyze_emotion(review_text, emotion_model):
         st.error(f"Emotion analysis failed: {str(e)}")
         return "Analysis Failed", 0.0
 
+
 # Function to extract aspects using ABSA model
 def extract_aspects(review_text, absa_model):
     default_return = {
@@ -562,6 +608,54 @@ def extract_aspects(review_text, absa_model):
         print(f"Error in extract_aspects: {str(e)}")
         return default_return
 
+
+# Sidebar: Product Analysis
+st.sidebar.header("📈 Product Analysis")
+with st.sidebar.expander("Product Sentiment Analysis"):
+    # Get unique products from customer reviews
+    reviewed_products = set()
+    for order_key in st.session_state.customer_reviews.keys():
+        product = order_key.split('_')[-1]
+        reviewed_products.add(product)
+    reviewed_products = list(reviewed_products)
+
+    if reviewed_products:
+        selected_product = st.selectbox("Select Product for Analysis", reviewed_products)
+
+        # Generate data for bar graph
+        aspects, avg_positive, avg_negative = generate_product_analysis_data(selected_product,
+                                                                             st.session_state.customer_reviews)
+
+        # Create grouped bar chart
+        fig = go.Figure(data=[
+            go.Bar(
+                name='Positive',
+                x=aspects,
+                y=avg_positive,
+                marker_color='green'
+            ),
+            go.Bar(
+                name='Negative',
+                x=aspects,
+                y=avg_negative,
+                marker_color='red'
+            )
+        ])
+
+        # Update layout
+        fig.update_layout(
+            title=f'Sentiment Analysis for {selected_product}',
+            xaxis_title='Aspects',
+            yaxis_title='Average Sentiment Score',
+            barmode='group',
+            yaxis_range=[0, 1],
+            template='plotly_white',
+            height=400
+        )
+
+        st.plotly_chart(fig, use_container_width=True)
+    else:
+        st.info("No reviews available for analysis.")
 
 # Sidebar: Customer Support
 st.sidebar.header("💬 Customer Support")
@@ -671,7 +765,8 @@ with st.sidebar.expander("Leave a Review"):
                     'Date': order['Date'],
                     'Product': item['Product'],
                     'Quantity': item['Quantity'],
-                    'Current Stock': st.session_state.stock[st.session_state.stock['Product'] == item['Product']]['Available_Stock'].values[0],
+                    'Current Stock': st.session_state.stock[st.session_state.stock['Product'] == item['Product']][
+                        'Available_Stock'].values[0],
                     'Review': review_status['review'],
                     'Star Rating': review_status['star_rating'],
                     'Emotion': review_status['emotion'],
@@ -683,10 +778,12 @@ with st.sidebar.expander("Leave a Review"):
         if review_orders:
             review_df = pd.DataFrame(review_orders)
 
+
             def style_review_row(row):
                 if row['Review'] != 'Not yet given':
                     return ['background-color: #d3d3d3; color: #666;'] * len(row)
                 return [''] * len(row)
+
 
             st.dataframe(review_df.style.apply(style_review_row, axis=1))
 
@@ -812,7 +909,6 @@ with st.sidebar:
             border-radius: 5px;
             text-align: center;
             color: #28a745;
-            font-weight: bold;
         }
         </style>
         """, unsafe_allow_html=True)
@@ -899,7 +995,8 @@ if st.session_state.day_started:
     product = st.selectbox("Select Product", st.session_state.stock['Product'])
     qty = st.number_input(f"Enter quantity for {product} ({units[product]})", min_value=1, step=1)
     if st.button("Add to Order"):
-        available = st.session_state.stock.loc[st.session_state.stock['Product'] == product, 'Available_Stock'].values[0]
+        available = st.session_state.stock.loc[st.session_state.stock['Product'] == product, 'Available_Stock'].values[
+            0]
         if qty > available:
             st.error(f"Only {available} {units[product]} of {product} available.")
         else:
@@ -927,6 +1024,7 @@ if st.session_state.day_started:
     # Inventory Status
     st.subheader(f"📦 Updated Inventory Schedule as on {st.session_state.simulation_day.strftime('%Y-%m-%d')}")
 
+
     def get_stock_status(row):
         if row['Available_Stock'] < row['ROL']:
             return 'Below Reorder Level'
@@ -934,15 +1032,18 @@ if st.session_state.day_started:
             return 'At Reorder Level'
         return 'Sufficient Stock'
 
+
     def calculate_to_be_ordered(row):
         if row['Available_Stock'] <= row['ROL']:
             return row['Max_Stock'] - row['Available_Stock']
         return 'N/A'
 
+
     def calculate_time_to_stock_out(row):
         if row['Available_Stock'] <= row['ROL']:
             return f"{row['Available_Stock'] / row['Demand_Rate_per_Day']:.1f}"
         return 'N/A'
+
 
     def color_row(row):
         color = ''
@@ -951,6 +1052,7 @@ if st.session_state.day_started:
         elif row['Stock_Status'] == 'At Reorder Level':
             color = 'background-color: orange; animation: blink 1s infinite;'
         return [color] * len(row)
+
 
     st.markdown("""
     <style>
@@ -1016,6 +1118,7 @@ if st.session_state.day_started:
                 df = pd.DataFrame(st.session_state.supplier_quotes[product])
                 selection = st.radio(f"Choose Supplier for {product}", df['Supplier'], key=f"select_{product}")
 
+
                 def fetch_weather_news(city, api_key='5b4c4d76315e4132b5d5efa76f306db1'):
                     try:
                         four_days_ago = (datetime.now() - timedelta(days=4)).strftime('%Y-%m-%d')
@@ -1049,7 +1152,8 @@ if st.session_state.day_started:
                                 continue
                             try:
                                 downloaded = trafilatura.fetch_url(article_url)
-                                full_text = trafilatura.extract(downloaded) if downloaded else '[Could not download content]'
+                                full_text = trafilatura.extract(
+                                    downloaded) if downloaded else '[Could not download content]'
                             except Exception:
                                 full_text = '[Error downloading content]'
                             summary = full_text[:400] + "..." if full_text and len(full_text) > 400 else full_text
@@ -1063,6 +1167,7 @@ if st.session_state.day_started:
                         return results
                     except Exception:
                         return []
+
 
                 selected_supplier = st.session_state[f"select_{product}"]
                 city = supplier_city.get(selected_supplier, 'Unknown')
@@ -1083,7 +1188,7 @@ if st.session_state.day_started:
                     rate = float(quote['Rate per Unit (Rs.)'].strip('₹'))
                     promised_days = quote['Promised Days']
                     lead_time_days = int(st.session_state.stock.loc[
-                        st.session_state.stock['Product'] == product, 'Lead_Time_days'].values[0])
+                                             st.session_state.stock['Product'] == product, 'Lead_Time_days'].values[0])
                     procurement_order = {
                         'Product': product,
                         'Supplier': selection,
@@ -1117,7 +1222,8 @@ if st.session_state.day_started:
                         f"Please confirm receipt of this order and ensure timely delivery.\n\n"
                         f"Regards,\nBuyer"
                     )
-                    msg['Subject'] = f"Order Confirmation for {product} - Placed on {st.session_state.simulation_day.strftime('%Y-%m-%d')}"
+                    msg[
+                        'Subject'] = f"Order Confirmation for {product} - Placed on {st.session_state.simulation_day.strftime('%Y-%m-%d')}"
                     msg['From'] = "supplier123.sample@gmail.com"
                     msg['To'] = "supplier123.sample@gmail.com"
                     try:
@@ -1205,7 +1311,8 @@ if st.session_state.day_started:
                         f"- Total Cost: {row['Total Cost']}\n\n"
                         f"Regards,\nBuyer"
                     )
-                    msg['Subject'] = f"Reminder for the {row['Product']} order placed on {row['Order_Date'].strftime('%Y-%m-%d')}"
+                    msg[
+                        'Subject'] = f"Reminder for the {row['Product']} order placed on {row['Order_Date'].strftime('%Y-%m-%d')}"
                     msg['From'] = "supplier123.sample@gmail.com"
                     msg['To'] = "supplier123.sample@gmail.com"
                     try:
@@ -1229,11 +1336,13 @@ if st.session_state.day_started:
             </div>
             """, unsafe_allow_html=True)
 
+
         def style_procurement_row(row):
             styles = [''] * len(row)
             if row['Status'] == "Overdue" and not row['Received']:
                 styles = ['background-color: #ffcccc; color: red; animation: blink 1s infinite;'] * len(row)
             return styles
+
 
         if not df_proc.empty:
             disabled_columns = ["Product", "Supplier", "Units Ordered", "Rate per Unit", "Total Cost", "Order_Date",
@@ -1251,7 +1360,8 @@ if st.session_state.day_started:
                     "Promised Days": st.column_config.NumberColumn(width="small"),
                     "Promised_Date": st.column_config.DateColumn("Promised Date", format="YYYY-MM-DD", width="medium"),
                     "Lead_Time_days": st.column_config.NumberColumn("Lead Time Days", width="small"),
-                    "Lead_Time_Date": st.column_config.DateColumn("Lead Time Date", format="YYYY-MM-DD", width="medium"),
+                    "Lead_Time_Date": st.column_config.DateColumn("Lead Time Date", format="YYYY-MM-DD",
+                                                                  width="medium"),
                     "Order_Placed": st.column_config.TextColumn(width="small"),
                     "Days Left": st.column_config.NumberColumn(width="small"),
                     "Status": st.column_config.TextColumn("Status", width="small"),
