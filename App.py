@@ -13,22 +13,23 @@ import time
 from transformers import pipeline, AutoModelForSequenceClassification, AutoTokenizer
 from fuzzywuzzy import process
 
-# Initialize ABSA model
+# Initialize ABSA model (used for both aspects and emotion)
 try:
     model_name = "yangheng/deberta-v3-base-absa-v1.1"
-
     tokenizer = AutoTokenizer.from_pretrained(model_name)
     model = AutoModelForSequenceClassification.from_pretrained(model_name, device_map="auto")
-
     absa_model = pipeline(
         "text-classification",
         model=model,
         tokenizer=tokenizer
     )
-
+    emotion_model = absa_model  # Reuse the same pipeline
 except Exception as e:
     st.error(f"Failed to load ABSA model: {str(e)}")
     absa_model = None
+    emotion_model = None
+
+
 
 # Get API key from Streamlit secrets or environment variable
 groq_api_key = st.secrets.get("GROQ_API_KEY")
@@ -404,12 +405,80 @@ def process_procurement_query(query, stock_df, supplier_quotes, procurement_orde
         st.error(f"API Error: {str(e)}")
         return "Sorry, I'm having trouble processing your query. Please try again!", "unclear", None, None, False
 
+
+def analyze_emotion_from_top_aspects(review_text, absa_model):
+    try:
+        if not review_text.strip() or not absa_model:
+            return "neutral", 0.5
+
+        aspects = ['quality', 'price', 'taste', 'freshness', 'packaging', 'delivery']
+        positive_scores = {}
+        negative_scores = {}
+
+        for aspect in aspects:
+            try:
+                result = absa_model(review_text, text_pair=aspect)
+                if result and isinstance(result, list) and len(result) > 0:
+                    label = result[0].get('label', '').lower()
+                    score = result[0].get('score', 0)
+
+                    if label == 'positive':
+                        positive_scores[aspect] = score
+                    elif label == 'negative':
+                        negative_scores[aspect] = score
+            except Exception as e:
+                continue
+
+        # If no aspects detected, return neutral
+        if not positive_scores and not negative_scores:
+            return "neutral", 0.5
+
+        # Get top positive and negative scores
+        top_positive_score = max(positive_scores.values()) if positive_scores else 0
+        top_negative_score = max(negative_scores.values()) if negative_scores else 0
+
+        # Calculate net score
+        total = top_positive_score + top_negative_score
+        if total == 0:
+            return "neutral", 0.5
+
+        net_score = (top_positive_score - top_negative_score) / total
+
+        # Determine emotion based on net score
+        if net_score > 0.75:
+            emotion = "Very Joyful"
+        elif net_score > 0.5:
+            emotion = "Joyful"
+        elif net_score > 0.25:
+            emotion = "Mildly Joyful"
+        elif net_score > 0:
+            emotion = "Slightly Joyful"
+        elif net_score < -0.75:
+            emotion = "Very Disappointed"
+        elif net_score < -0.5:
+            emotion = "Disappointed"
+        elif net_score < -0.25:
+            emotion = "Mildly Disappointed"
+        elif net_score < 0:
+            emotion = "Slightly Disappointed"
+        else:
+            emotion = "Neutral"
+
+        # Map to 0-1 scale for emoji
+        rating_score = (net_score + 1) / 2
+        return emotion, rating_score
+
+    except Exception as e:
+        print(f"Error in analyze_emotion_from_top_aspects: {str(e)}")
+        return "neutral", 0.5
+
+
 # Function to map sentiment score to emoticon and label
 def get_sentiment_emoticon(score):
     if 0.00 <= score <= 0.15:
-        return "😡", "Furious"
+        return "😞", "Deeply Disappointed"
     elif 0.16 <= score <= 0.35:
-        return "😞", "Disappointed"
+        return "😟", "Disappointed"
     elif 0.36 <= score <= 0.55:
         return "😐", "Neutral"
     elif 0.56 <= score <= 0.75:
@@ -420,30 +489,78 @@ def get_sentiment_emoticon(score):
         return "🤩", "Delighted"
     return "❓", "Unknown"
 
+
+# Function to extract emotion using ASBA model
+def analyze_emotion(review_text, emotion_model):
+    if not emotion_model:
+        return "Error", 0.0
+    try:
+        result = emotion_model(review_text)
+        emotion = result[0]['label']
+        score = result[0]['score']
+        return emotion, score
+    except Exception as e:
+        st.error(f"Emotion analysis failed: {str(e)}")
+        return "Analysis Failed", 0.0
+
 # Function to extract aspects using ABSA model
 def extract_aspects(review_text, absa_model):
-    aspects = ['quality', 'price', 'taste', 'freshness', 'packaging', 'delivery']
-    aspect_results = []
+    default_return = {
+        'positive_aspects': [],
+        'negative_aspects': [],
+        'all_aspects': []
+    }
 
-    for aspect in aspects:
-        try:
-            result = absa_model(review_text, text_pair=aspect)
-            label = result[0]['label']
-            score = result[0]['score']
-            aspect_results.append({
-                'aspect': aspect,
-                'label': label,
-                'score': score
-            })
-        except Exception:
-            continue
+    if not review_text.strip() or not absa_model:
+        return default_return
 
-    # Sort by score descending and pick top 2
-    aspect_results.sort(key=lambda x: x['score'], reverse=True)
-    top_two = aspect_results[:2]
+    try:
+        aspects = ['quality', 'price', 'taste', 'freshness', 'packaging', 'delivery']
+        positive_aspects = []
+        negative_aspects = []
 
-    # Format as strings like "packaging: Negative (1.00)"
-    return [f"{res['aspect']}: {res['label']} ({res['score']:.2f})" for res in top_two]
+        for aspect in aspects:
+            try:
+                result = absa_model(review_text, text_pair=aspect)
+                if result and isinstance(result, list) and len(result) > 0:
+                    label = result[0].get('label', '').lower()
+                    score = result[0].get('score', 0)
+
+                    if label == 'positive':
+                        positive_aspects.append({
+                            'aspect': aspect,
+                            'label': label,
+                            'score': score
+                        })
+                    elif label == 'negative':
+                        negative_aspects.append({
+                            'aspect': aspect,
+                            'label': label,
+                            'score': score
+                        })
+            except Exception:
+                continue
+
+        # Sort and get top aspects
+        positive_aspects.sort(key=lambda x: x['score'], reverse=True)
+        negative_aspects.sort(key=lambda x: x['score'], reverse=True)
+
+        top_positive = positive_aspects[:2]
+        top_negative = negative_aspects[:2]
+
+        # Format results
+        pos_str = [f"{res['aspect']} ({res['score']:.2f})" for res in top_positive]
+        neg_str = [f"{res['aspect']} ({res['score']:.2f})" for res in top_negative]
+
+        return {
+            'positive_aspects': pos_str,
+            'negative_aspects': neg_str,
+            'all_aspects': pos_str + neg_str
+        }
+
+    except Exception as e:
+        print(f"Error in extract_aspects: {str(e)}")
+        return default_return
 
 
 # Sidebar: Customer Support
@@ -559,7 +676,8 @@ with st.sidebar.expander("Leave a Review"):
                     'Star Rating': review_status['star_rating'],
                     'Emotion': review_status['emotion'],
                     'Textual Rating': review_status['textual_rating'],
-                    'Aspects': review_status['aspects']
+                    'Positive Aspects': review_status.get('positive_aspects', 'Not yet given'),
+                    'Negative Aspects': review_status.get('negative_aspects', 'Not yet given')
                 })
 
         if review_orders:
@@ -584,7 +702,7 @@ with st.sidebar.expander("Leave a Review"):
                     star_rating = st.selectbox(
                         "Rate this product (1-5 stars)",
                         options=["★☆☆☆☆", "★★☆☆☆", "★★★☆☆", "★★★★☆", "★★★★★"],
-                        index=2
+                        index=4
                     )
 
                     review_text = st.text_area("Your Review", help="Share your experience with this product")
@@ -592,52 +710,66 @@ with st.sidebar.expander("Leave a Review"):
 
                     if submit_button:
                         order_key = f"{selected_order_id}_{selected_product}"
-
                         if review_text.strip():
                             try:
-                                absa_result = absa_model(review_text)
-                                emotion = absa_result[0]['label']
-                                score = absa_result[0]['score'] if emotion == 'Positive' else 1 - absa_result[0]['score']
-                                emoticon, textual_label = get_sentiment_emoticon(score)
+                                # Analyze emotion and aspects
+                                emotion, rating_score = analyze_emotion_from_top_aspects(review_text, absa_model)
+                                emoticon, textual_label = get_sentiment_emoticon(rating_score)
 
-                                aspects = extract_aspects(review_text, absa_model)
-                                aspects_str = ", ".join(aspects) if isinstance(aspects, list) else aspects
+                                # Extract aspects
+                                aspect_results = extract_aspects(review_text, absa_model)
 
+                                # Store results
                                 st.session_state.customer_reviews[order_key] = {
                                     'review': review_text,
                                     'star_rating': star_rating,
-                                    'emotion': f"{emotion} ({score:.2f})",
+                                    'emotion': f"{emotion} ({rating_score:.2f})",
                                     'textual_rating': f"{emoticon} {textual_label}",
-                                    'aspects': aspects_str,
+                                    'positive_aspects': ", ".join(aspect_results['positive_aspects']) if aspect_results[
+                                        'positive_aspects'] else "",
+                                    'negative_aspects': ", ".join(aspect_results['negative_aspects']) if aspect_results[
+                                        'negative_aspects'] else "",
                                     'date': st.session_state.simulation_day.strftime('%Y-%m-%d')
                                 }
+
+                                st.success("Thank you for your review!")
+                                st.write(f"Star Rating: {star_rating}")
+                                st.write(f"Detected Emotion: {emotion}")
+                                st.write(f"Textual Rating: {emoticon} {textual_label}")
+                                if aspect_results['positive_aspects']:
+                                    st.write(f"Positive Aspects: {', '.join(aspect_results['positive_aspects'])}")
+                                if aspect_results['negative_aspects']:
+                                    st.write(f"Negative Aspects: {', '.join(aspect_results['negative_aspects'])}")
+
+                                st.rerun()
+
                             except Exception as e:
                                 st.error(f"Error analyzing review: {str(e)}")
+                                # Fallback to simple storage if analysis fails
                                 st.session_state.customer_reviews[order_key] = {
                                     'review': review_text,
                                     'star_rating': star_rating,
                                     'emotion': 'Analysis failed',
                                     'textual_rating': 'Analysis failed',
-                                    'aspects': 'Analysis failed',
+                                    'positive_aspects': 'Analysis failed',
+                                    'negative_aspects': 'Analysis failed',
                                     'date': st.session_state.simulation_day.strftime('%Y-%m-%d')
                                 }
+                                st.success("Thank you for your review! (Analysis failed)")
+                                st.rerun()
                         else:
+                            # Handle case where review text is empty
                             st.session_state.customer_reviews[order_key] = {
                                 'review': 'No text review provided',
                                 'star_rating': star_rating,
                                 'emotion': 'N/A',
                                 'textual_rating': 'N/A',
-                                'aspects': 'N/A',
+                                'positive_aspects': 'N/A',
+                                'negative_aspects': 'N/A',
                                 'date': st.session_state.simulation_day.strftime('%Y-%m-%d')
                             }
-
-                        st.success("Thank you for your review!")
-                        st.write(f"Star Rating: {star_rating}")
-                        if review_text.strip():
-                            st.write(f"Detected Emotion: {emotion} (confidence: {score:.2f})")
-                            st.write(f"Textual Rating: {emoticon} {textual_label}")
-                            st.write(f"Aspects: {aspects_str}")
-                        st.rerun()
+                            st.success("Thank you for your star rating!")
+                            st.rerun()
             else:
                 st.info("All your orders have been reviewed. Thank you!")
         else:
@@ -1192,27 +1324,22 @@ if st.session_state.day_started:
                     'emotion': 'Not yet given',
                     'textual_rating': 'Not yet given',
                     'star_rating': 'Not yet given',
-                    'aspects': 'Not yet given'
+                    'positive_aspects': 'Not yet given',
+                    'negative_aspects': 'Not yet given',
+                    'all_aspects': 'Not yet given'
                 })
-
-                # Convert list-based fields to strings
-                aspects_str = ", ".join(review_status['aspects']) if isinstance(review_status['aspects'], list) else review_status['aspects']
-                review_str = review_status['review'] if isinstance(review_status['review'], str) else "Not yet given"
-                emotion_str = review_status['emotion'] if isinstance(review_status['emotion'], str) else "Not yet given"
-                textual_rating_str = review_status['textual_rating'] if isinstance(review_status['textual_rating'], str) else "Not yet given"
-                star_rating_str = review_status['star_rating'] if isinstance(review_status['star_rating'], str) else "Not yet given"
-
                 all_orders.append({
                     'Order ID': order['Order ID'],
                     'Date': order['Date'],
                     'Product': item['Product'],
                     'Quantity': item['Quantity'],
-                    'Current Stock': st.session_state.stock[st.session_state.stock['Product'] == item['Product']]['Available_Stock'].values[0],
-                    'Review': review_str,
-                    'Emotion': emotion_str,
-                    'Textual Rating': textual_rating_str,
-                    'Star Rating': star_rating_str,
-                    'Aspects': aspects_str
+                    'Current Stock': st.session_state.stock[st.session_state.stock['Product'] == item['Product']][
+                        'Available_Stock'].values[0],
+                    'Review': review_status['review'],
+                    'Textual Rating': review_status['textual_rating'],
+                    'Star Rating': review_status['star_rating'],
+                    'Positive Aspects': review_status['positive_aspects'],
+                    'Negative Aspects': review_status['negative_aspects']
                 })
         if all_orders:
             st.dataframe(pd.DataFrame(all_orders))
