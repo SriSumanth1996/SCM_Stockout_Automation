@@ -2,19 +2,20 @@ streamlit==1.45.1
 pandas==2.2.3
 numpy==2.2.6
 groq==0.26.0
-datetime==5.5
 fuzzywuzzy==0.18.0
 sounddevice==0.5.2
 wavio==0.0.9
 faster-whisper==1.1.1
 pyaudio==0.2.14
-wave==0.0.2
 trafilatura==2.0.0
-transformers==4.52.4
-torch==2.7.0
+transformers==4.44.2
+torch==2.4.1
+torchvision==0.19.1
+torchaudio==2.4.1
 requests==2.32.3
 sentencepiece==0.2.0
-accelerate==1.7.0
+accelerate==1.0.1
 rich==14.0.0
-python-Levenshtein==0.12.2  # Optional but improves fuzzywuzzy performance
+python-Levenshtein==0.12.2
 plotly==5.24.1
+tokenizers==0.19.1
