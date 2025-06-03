@@ -18,7 +18,7 @@ import plotly.graph_objects as go
 try:
     model_name = "yangheng/deberta-v3-base-absa-v1.1"
     tokenizer = AutoTokenizer.from_pretrained(model_name)
-    model = AutoModelForSequenceClassification.from_pretrained(model_name, device_map="auto")
+    model = AutoModelForSequenceClassification.from_pretrained(model_name)
     absa_model = pipeline(
         "text-classification",
         model=model,
